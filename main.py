@@ -3,9 +3,10 @@ import os
 import random
 from PyQt6.QtWidgets import (QApplication, QWidget, QLabel, QPushButton, 
                              QVBoxLayout, QHBoxLayout, QProgressBar, QCheckBox, 
-                             QGroupBox, QComboBox, QFileDialog, QColorDialog, QLineEdit)
+                             QGroupBox, QComboBox, QFileDialog, QColorDialog, QLineEdit,
+                             QSystemTrayIcon, QMenu)
 from PyQt6.QtCore import QTimer, Qt
-from PyQt6.QtGui import QImage, QPixmap, QFont, QIcon, QColor, QGuiApplication
+from PyQt6.QtGui import QImage, QPixmap, QFont, QIcon, QColor, QGuiApplication, QPainter, QBrush
 
 from cv_tracker import CVTrackerWorker
 from activity_tracker import ActivityTrackerWorker
@@ -19,11 +20,8 @@ import config_manager
 class SettingsPanel(QWidget):
     """
     Ultra-Premium Multimodal Control Dashboard for Desktop Focus Pet.
-    Features 4-Sensor Focus Fusion:
-    - Vision Face & Eye Tracking
-    - Keyboard & Mouse Input Activity
-    - Microphone Voice Activity (Calls / Dictation)
-    - Active Workspace Window Tracking
+    Runs as a background daemon process with Windows System Tray integration
+    and Pet click-to-toggle visibility.
     """
     def __init__(self, engine, pet_window, screen_overlay, cv_worker, activity_worker, mic_worker, window_worker):
         super().__init__()
@@ -148,6 +146,7 @@ class SettingsPanel(QWidget):
         """)
 
         self.setup_ui()
+        self.setup_system_tray()
         self.apply_current_pet_style()
         self.apply_saved_sensitivity()
 
@@ -163,6 +162,59 @@ class SettingsPanel(QWidget):
         self.loop_timer = QTimer(self)
         self.loop_timer.timeout.connect(self.on_tick)
         self.loop_timer.start(100)
+
+    def setup_system_tray(self):
+        self.tray_icon = QSystemTrayIcon(self)
+        
+        # Render clean system tray icon pixmap
+        pix = QPixmap(32, 32)
+        pix.fill(QColor(0, 0, 0, 0))
+        painter = QPainter(pix)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setBrush(QBrush(QColor("#7aa2f7")))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.drawEllipse(2, 2, 28, 28)
+        painter.setBrush(QBrush(QColor("#15161e")))
+        painter.drawEllipse(10, 10, 12, 12)
+        painter.end()
+        
+        self.tray_icon.setIcon(QIcon(pix))
+        self.tray_icon.setToolTip("Desktop Focus Pet - Background Daemon")
+
+        tray_menu = QMenu(self)
+        
+        show_action = tray_menu.addAction("⚙️ Open Control Dashboard")
+        show_action.triggered.connect(self.show_and_activate)
+        
+        reset_action = tray_menu.addAction("🔄 Reset Distraction Score (0%)")
+        reset_action.triggered.connect(self.on_reset_score_clicked)
+        
+        calib_action = tray_menu.addAction("📷 Start Auto-Calibration")
+        calib_action.triggered.connect(self.cv_worker.start_calibration)
+
+        tray_menu.addSeparator()
+        
+        quit_action = tray_menu.addAction("❌ Exit Application")
+        quit_action.triggered.connect(self.force_exit)
+
+        self.tray_icon.setContextMenu(tray_menu)
+        self.tray_icon.activated.connect(self.on_tray_icon_activated)
+        self.tray_icon.show()
+
+    def on_tray_icon_activated(self, reason):
+        if reason == QSystemTrayIcon.ActivationReason.Trigger:
+            self.toggle_visibility()
+
+    def toggle_visibility(self):
+        if self.isVisible():
+            self.hide()
+        else:
+            self.show_and_activate()
+
+    def show_and_activate(self):
+        self.show()
+        self.raise_()
+        self.activateWindow()
 
     def setup_ui(self):
         main_layout = QVBoxLayout()
@@ -423,7 +475,7 @@ class SettingsPanel(QWidget):
                 background-color: rgba(255, 75, 114, 0.3);
             }
         """)
-        quit_btn.clicked.connect(self.close)
+        quit_btn.clicked.connect(self.force_exit)
         main_layout.addWidget(quit_btn)
 
         self.setLayout(main_layout)
@@ -526,7 +578,6 @@ class SettingsPanel(QWidget):
 
     def on_window_update(self, window_title: str):
         self.latest_window_title = window_title
-        # Truncate title if too long
         disp_title = window_title if len(window_title) <= 35 else window_title[:32] + "..."
         self.window_badge_lbl.setText(f"💻 Active Context: {disp_title}")
 
@@ -641,6 +692,14 @@ class SettingsPanel(QWidget):
         self.active_popups.clear()
 
     def closeEvent(self, event):
+        # Minimize to System Tray daemon when top-right window 'X' is clicked
+        if hasattr(self, 'tray_icon') and self.tray_icon and self.tray_icon.isVisible():
+            self.hide()
+            event.ignore()
+        else:
+            self.force_exit()
+
+    def force_exit(self):
         self.loop_timer.stop()
         self.clear_all_popups()
         self.cv_worker.stop()
@@ -649,10 +708,11 @@ class SettingsPanel(QWidget):
         self.window_worker.stop()
         self.pet_window.close()
         self.screen_overlay.close()
-        event.accept()
+        QApplication.quit()
 
 def main():
     app = QApplication(sys.argv)
+    app.setQuitOnLastWindowClosed(False)  # Keep running daemon when main window is hidden
     
     config = config_manager.load_config()
     if config.get("autostart", False):
@@ -683,7 +743,23 @@ def main():
     
     # Initialize Main Controller Settings Panel
     settings_panel = SettingsPanel(engine, pet_window, screen_overlay, cv_worker, activity_worker, mic_worker, window_worker)
-    settings_panel.show()
+    
+    # Click on Desktop Pet opens/toggles the Control Dashboard!
+    pet_window.pet_clicked.connect(settings_panel.toggle_visibility)
+
+    # Check for --daemon or --minimized command line flag
+    daemon_mode = "--daemon" in sys.argv or "--minimized" in sys.argv
+    if not daemon_mode:
+        settings_panel.show_and_activate()
+    else:
+        settings_panel.hide()
+        if hasattr(settings_panel, 'tray_icon'):
+            settings_panel.tray_icon.showMessage(
+                "Desktop Focus Pet",
+                "Running as background daemon. Click your desktop pet or tray icon to open dashboard.",
+                QSystemTrayIcon.MessageIcon.Information,
+                3000
+            )
     
     sys.exit(app.exec())
 

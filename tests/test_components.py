@@ -239,6 +239,8 @@ class TestConfigManager(unittest.TestCase):
         import config_manager
         cmd = config_manager.get_launch_command()
         self.assertIn("run.py", cmd)
+        self.assertIn("--daemon", cmd)
+
 
 class TestMultimodalFusion(unittest.TestCase):
     def test_update_fused(self):

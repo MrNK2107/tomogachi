@@ -19,6 +19,8 @@ class PetWindow(QWidget):
     Moves towards the cursor (Level 1), knocks on the screen (Level 2), 
     and wiggles/shakes violently (Level 3).
     """
+    pet_clicked = pyqtSignal()
+
     def __init__(self, screen_overlay=None):
         super().__init__()
         self.screen_overlay = screen_overlay
@@ -30,6 +32,8 @@ class PetWindow(QWidget):
             Qt.WindowType.Tool
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
         
         # Fixed size for the pet bounding box
         self.setFixedSize(180, 180)
@@ -233,6 +237,25 @@ class PetWindow(QWidget):
                 audio_guard.play_alert_tone(frequency=1000.0, duration=0.1, volume=0.25)
                 
         self.update()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+            self.click_start_pos = event.globalPosition().toPoint()
+            event.accept()
+
+    def mouseMoveEvent(self, event):
+        if event.buttons() == Qt.MouseButton.LeftButton and hasattr(self, 'drag_pos'):
+            self.move(event.globalPosition().toPoint() - self.drag_pos)
+            event.accept()
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton and hasattr(self, 'click_start_pos'):
+            move_dist = (event.globalPosition().toPoint() - self.click_start_pos).manhattanLength()
+            if move_dist < 5:  # Click without dragging
+                self.pet_clicked.emit()
+            event.accept()
+
 
     def paintEvent(self, event):
         painter = QPainter(self)

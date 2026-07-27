@@ -55,7 +55,8 @@ def get_launch_command() -> str:
         if not os.path.exists(python_exe):
             python_exe = sys.executable
             
-    return f'"{python_exe}" "{run_script}"'
+    return f'"{python_exe}" "{run_script}" --daemon'
+
 
 def set_windows_autostart(enable: bool) -> bool:
     """
