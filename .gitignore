@@ -1,0 +1,23 @@
+# Python & Environment
+venv/
+ENV/
+env/
+.venv/
+__pycache__/
+*.py[cod]
+*$py.class
+
+# IDE & Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Local User Data / Config
+config.json
+*.log
+.DS_Store
+
+# Temporary files
+scratch/
+tmp/
