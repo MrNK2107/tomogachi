@@ -3,4 +3,14 @@ mediapipe<=0.10.14
 PyQt6
 sounddevice
 numpy
-
+python-telegram-bot>=20.0
+python-dotenv>=1.0.0
+fastapi>=0.110.0
+uvicorn>=0.28.0
+pydantic>=2.0.0
+psutil>=5.9.0
+pywin32>=306
+requests>=2.31.0
+rich>=13.0.0
+pytest
+pytest-asyncio

@@ -1,21 +1,102 @@
 import sys
 import os
 import random
+import time
 from PyQt6.QtWidgets import (QApplication, QWidget, QLabel, QPushButton, 
                              QVBoxLayout, QHBoxLayout, QProgressBar, QCheckBox, 
                              QGroupBox, QComboBox, QFileDialog, QColorDialog, QLineEdit,
                              QSystemTrayIcon, QMenu)
 from PyQt6.QtCore import QTimer, Qt
-from PyQt6.QtGui import QImage, QPixmap, QFont, QIcon, QColor, QGuiApplication, QPainter, QBrush
+from PyQt6.QtGui import QImage, QPixmap, QFont, QIcon, QColor, QGuiApplication, QPainter, QBrush, QPainterPath
+from PyQt6.QtCore import QRectF
 
 from cv_tracker import CVTrackerWorker
 from activity_tracker import ActivityTrackerWorker
 from mic_tracker import MicTrackerWorker
 from window_tracker import WindowTrackerWorker
+from context_scanner import ContextScannerWorker
+from mouse_analytics import MouseAnalyticsWorker
+from clipboard_tracker import ClipboardTrackerWorker
 from intensity_engine import IntensityEngine
 from pet_gui import PetWindow, ScreenOverlay, FakePopup
 import audio_guard
 import config_manager
+import config
+from agent_tracker import AgentTrackerWorker
+from telegram_worker import TelegramBotWorker
+from core.power_monitor import PowerMonitor
+from core.heartbeat_client import HeartbeatClient
+from core.idle_detector import IdleDetector
+from core.agent_detector import AgentDetector
+from quiz.quiz_manager import QuizManager
+
+class FocusHistory:
+    """Tracks focus scores over time for statistics display."""
+    def __init__(self, max_samples: int = 600):  # 600 samples = ~1 minute at 100ms
+        self.max_samples = max_samples
+        self.scores = []
+        self.timestamps = []
+        self.focused_time = 0.0
+        self.total_time = 0.0
+        self.session_start = time.time()
+        
+    def add_sample(self, score: float):
+        self.scores.append(score)
+        self.timestamps.append(time.time())
+        if len(self.scores) > self.max_samples:
+            self.scores.pop(0)
+            self.timestamps.pop(0)
+        
+    def update_time(self, is_focused: bool, dt: float):
+        self.total_time += dt
+        if is_focused:
+            self.focused_time += dt
+
+    def get_focus_percentage(self) -> float:
+        if self.total_time <= 0:
+            return 100.0
+        return (self.focused_time / self.total_time) * 100.0
+
+    def get_current_streak(self) -> str:
+        """Return a formatted streak string."""
+        if self.total_time < 60:
+            return "Just started"
+        mins = int(self.focused_time // 60)
+        secs = int(self.focused_time % 60)
+        return f"{mins}m {secs}s focused"
+
+    def get_recent_mood(self) -> float:
+        """
+        Calculate pet mood based on recent focus history (last 2 minutes).
+        Returns 0 (angry) to 100 (ecstatic).
+        Uses a rolling window + exponential decay for responsiveness.
+        """
+        if not self.scores:
+            return 50.0
+        
+        # Use last 120 samples (~2 minutes at 1 sample/second)
+        recent = self.scores[-120:]
+        if not recent:
+            return 50.0
+        
+        # Weight: more recent samples matter more
+        total_weight = 0
+        weighted_sum = 0
+        for i, score in enumerate(recent):
+            weight = 1.0 + (i / len(recent))  # Later samples weigh up to 2x
+            total_weight += weight
+            # Invert distraction score for mood (0 distraction = 100 mood)
+            weighted_sum += (100.0 - score) * weight
+        
+        return weighted_sum / total_weight if total_weight > 0 else 50.0
+
+    def reset(self):
+        self.scores.clear()
+        self.timestamps.clear()
+        self.focused_time = 0.0
+        self.total_time = 0.0
+        self.session_start = time.time()
+
 
 class SettingsPanel(QWidget):
     """
@@ -23,7 +104,9 @@ class SettingsPanel(QWidget):
     Runs as a background daemon process with Windows System Tray integration
     and Pet click-to-toggle visibility.
     """
-    def __init__(self, engine, pet_window, screen_overlay, cv_worker, activity_worker, mic_worker, window_worker):
+    def __init__(self, engine, pet_window, screen_overlay, cv_worker, activity_worker, mic_worker, window_worker,
+                 context_worker=None, mouse_worker=None, clipboard_worker=None,
+                 agent_worker=None, telegram_worker=None):
         super().__init__()
         self.engine = engine
         self.pet_window = pet_window
@@ -32,6 +115,11 @@ class SettingsPanel(QWidget):
         self.activity_worker = activity_worker
         self.mic_worker = mic_worker
         self.window_worker = window_worker
+        self.context_worker = context_worker
+        self.mouse_worker = mouse_worker
+        self.clipboard_worker = clipboard_worker
+        self.agent_worker = agent_worker
+        self.telegram_worker = telegram_worker
         
         self.config = config_manager.load_config()
         self.latest_is_focused = True
@@ -41,13 +129,32 @@ class SettingsPanel(QWidget):
         self.latest_mic_active = False
         self.latest_mic_rms = 0.0
         self.latest_window_title = "Desktop"
+        # New sensor states
+        self.latest_app_context = "NEUTRAL"
+        self.latest_mouse_steady = True
+        self.latest_mouse_velocity = 0.0
+        self.latest_clipboard_active = False
+        self.latest_clipboard_changes = 0
+        self.latest_agent_active = False
+        self.latest_agents_summary = "None"
+        self.away_alert_tick_counter = 0
 
         self.active_popups = []
         self.popup_spawn_ticks = 0
+        
+        # Focus history tracking
+        self.focus_history = FocusHistory()
+        self.stats_tick_counter = 0
+
+        if self.agent_worker:
+            self.agent_worker.agent_update.connect(self.on_agent_update)
+        if self.telegram_worker:
+            self.telegram_worker.quiz_solved.connect(self.on_quiz_solved)
+            self.telegram_worker.set_pet_state_getter(self.get_live_pet_state)
 
         self.setWindowTitle("Desktop Focus Pet - Control Dashboard")
-        self.setFixedSize(500, 840)
-        self.setWindowFlags(Qt.WindowType.Window | Qt.WindowType.WindowCloseButtonHint)
+        self.setFixedSize(500, 960)
+        self.setWindowFlags(Qt.WindowType.Window | Qt.WindowType.WindowCloseButtonHint | Qt.WindowType.WindowStaysOnTopHint)
         
         # Premium Dark Obsidian & Neon Glassmorphic Stylesheet
         self.setStyleSheet("""
@@ -143,6 +250,15 @@ class SettingsPanel(QWidget):
                 selection-background-color: #232840;
                 selection-color: #00f5d4;
             }
+            QLabel#StatValue {
+                font-size: 18px;
+                font-weight: bold;
+                color: #ffffff;
+            }
+            QLabel#StatLabel {
+                font-size: 10px;
+                color: #8f94a8;
+            }
         """)
 
         self.setup_ui()
@@ -157,6 +273,14 @@ class SettingsPanel(QWidget):
         self.activity_worker.activity_update.connect(self.on_activity_update)
         self.mic_worker.mic_update.connect(self.on_mic_update)
         self.window_worker.window_update.connect(self.on_window_update)
+        
+        # Connect new sensor signals
+        if self.context_worker:
+            self.context_worker.context_update.connect(self.on_context_update)
+        if self.mouse_worker:
+            self.mouse_worker.mouse_update.connect(self.on_mouse_update)
+        if self.clipboard_worker:
+            self.clipboard_worker.clipboard_update.connect(self.on_clipboard_update)
 
         # 100ms Interval Core Update Loop
         self.loop_timer = QTimer(self)
@@ -240,6 +364,93 @@ class SettingsPanel(QWidget):
 
         main_layout.addWidget(header_widget)
 
+        # Group 0: Session Statistics & Focus History
+        stats_group = QGroupBox("Session Statistics")
+        stats_layout = QVBoxLayout(stats_group)
+        stats_layout.setSpacing(6)
+        
+        # Stats row with 3 stat cards
+        stats_row = QHBoxLayout()
+        stats_row.setSpacing(8)
+        
+        # Stat: Focus %
+        focus_stat_widget = QWidget()
+        focus_stat_layout = QVBoxLayout(focus_stat_widget)
+        focus_stat_layout.setContentsMargins(4, 2, 4, 2)
+        focus_stat_layout.setSpacing(1)
+        self.stat_focus_label = QLabel("Focus Rate")
+        self.stat_focus_label.setObjectName("StatLabel")
+        self.stat_focus_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        focus_stat_layout.addWidget(self.stat_focus_label)
+        self.stat_focus_val = QLabel("100%")
+        self.stat_focus_val.setObjectName("StatValue")
+        self.stat_focus_val.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.stat_focus_val.setStyleSheet("color: #00f5d4; font-size: 20px; font-weight: bold;")
+        focus_stat_layout.addWidget(self.stat_focus_val)
+        stats_row.addWidget(focus_stat_widget)
+        
+        # Stat: Streak
+        streak_stat_widget = QWidget()
+        streak_stat_layout = QVBoxLayout(streak_stat_widget)
+        streak_stat_layout.setContentsMargins(4, 2, 4, 2)
+        streak_stat_layout.setSpacing(1)
+        self.stat_streak_label = QLabel("Focus Streak")
+        self.stat_streak_label.setObjectName("StatLabel")
+        self.stat_streak_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        streak_stat_layout.addWidget(self.stat_streak_label)
+        self.stat_streak_val = QLabel("0m 0s")
+        self.stat_streak_val.setObjectName("StatValue")
+        self.stat_streak_val.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.stat_streak_val.setStyleSheet("color: #4facfe; font-size: 20px; font-weight: bold;")
+        streak_stat_layout.addWidget(self.stat_streak_val)
+        stats_row.addWidget(streak_stat_widget)
+        
+        # Stat: Session Time
+        session_stat_widget = QWidget()
+        session_stat_layout = QVBoxLayout(session_stat_widget)
+        session_stat_layout.setContentsMargins(4, 2, 4, 2)
+        session_stat_layout.setSpacing(1)
+        self.stat_session_label = QLabel("Session")
+        self.stat_session_label.setObjectName("StatLabel")
+        self.stat_session_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        session_stat_layout.addWidget(self.stat_session_label)
+        self.stat_session_val = QLabel("0s")
+        self.stat_session_val.setObjectName("StatValue")
+        self.stat_session_val.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.stat_session_val.setStyleSheet("color: #bb9af7; font-size: 20px; font-weight: bold;")
+        session_stat_layout.addWidget(self.stat_session_val)
+        stats_row.addWidget(session_stat_widget)
+        
+        stats_layout.addLayout(stats_row)
+        
+        # Pet Mood Indicator
+        self.mood_widget = QWidget()
+        mood_layout = QHBoxLayout(self.mood_widget)
+        mood_layout.setContentsMargins(4, 2, 4, 2)
+        mood_layout.setSpacing(8)
+        
+        mood_label = QLabel("Pet Mood:")
+        mood_label.setStyleSheet("color: #8f94a8; font-size: 11px;")
+        mood_layout.addWidget(mood_label)
+        
+        self.mood_emoticon_lbl = QLabel("😐")
+        self.mood_emoticon_lbl.setFont(QFont("Segoe UI", 18))
+        mood_layout.addWidget(self.mood_emoticon_lbl)
+        
+        self.mood_name_lbl = QLabel("Neutral")
+        self.mood_name_lbl.setStyleSheet("color: #8f94a8; font-size: 11px; font-weight: bold;")
+        mood_layout.addWidget(self.mood_name_lbl)
+        
+        mood_layout.addStretch()
+        stats_layout.addWidget(self.mood_widget)
+        
+        # Mini focus history bar (custom widget with paintEvent)
+        self.history_bar = HistoryBarWidget()
+        self.history_bar.setFixedHeight(20)
+        stats_layout.addWidget(self.history_bar)
+        
+        main_layout.addWidget(stats_group)
+        
         # Group 1: Live Multimodal Sensor Matrix & Metrics
         metrics_group = QGroupBox("Multimodal Focus Sensor Matrix")
         metrics_layout = QVBoxLayout(metrics_group)
@@ -287,6 +498,27 @@ class SettingsPanel(QWidget):
         self.audio_status_lbl = QLabel("🎧 Audio Guard: Loading...")
         self.audio_status_lbl.setStyleSheet("color: #8f94a8;")
         sensor_badges_layout.addWidget(self.audio_status_lbl)
+
+        # New sensor badges
+        self.context_badge_lbl = QLabel("💻 App Context: Waiting for data...")
+        self.context_badge_lbl.setStyleSheet("color: #8f94a8;")
+        sensor_badges_layout.addWidget(self.context_badge_lbl)
+
+        self.mouse_badge_lbl = QLabel("🖱️ Mouse Analytics: Waiting for data...")
+        self.mouse_badge_lbl.setStyleSheet("color: #8f94a8;")
+        sensor_badges_layout.addWidget(self.mouse_badge_lbl)
+
+        self.clipboard_badge_lbl = QLabel("📋 Clipboard: Waiting for data...")
+        self.clipboard_badge_lbl.setStyleSheet("color: #8f94a8;")
+        sensor_badges_layout.addWidget(self.clipboard_badge_lbl)
+
+        self.agent_badge_lbl = QLabel("⚡ AI Agents: Scanning processes...")
+        self.agent_badge_lbl.setStyleSheet("color: #8f94a8;")
+        sensor_badges_layout.addWidget(self.agent_badge_lbl)
+
+        self.telegram_badge_lbl = QLabel("📱 Telegram Sentinel: @idle_alerter_bot (Linked)")
+        self.telegram_badge_lbl.setStyleSheet("color: #00f5d4; font-weight: bold;")
+        sensor_badges_layout.addWidget(self.telegram_badge_lbl)
 
         metrics_layout.addLayout(sensor_badges_layout)
 
@@ -581,8 +813,79 @@ class SettingsPanel(QWidget):
         disp_title = window_title if len(window_title) <= 35 else window_title[:32] + "..."
         self.window_badge_lbl.setText(f"💻 Active Context: {disp_title}")
 
+    def on_context_update(self, title: str, classification: str):
+        """Handle active window context classification."""
+        self.latest_app_context = classification
+        if hasattr(self, 'context_badge_lbl'):
+            emoji = "✅" if classification == "PRODUCTIVE" else "⚠️" if classification == "DISTRACTING" else "💻"
+            color = "#00f5d4" if classification == "PRODUCTIVE" else "#ff0844" if classification == "DISTRACTING" else "#8f94a8"
+            self.context_badge_lbl.setText(f"{emoji} App Context: {classification}")
+            self.context_badge_lbl.setStyleSheet(f"color: {color}; font-weight: bold;")
+
+    def on_mouse_update(self, is_steady: bool, velocity: float, erraticness: float):
+        """Handle mouse movement analytics."""
+        self.latest_mouse_steady = is_steady
+        self.latest_mouse_velocity = velocity
+        if hasattr(self, 'mouse_badge_lbl'):
+            if is_steady:
+                self.mouse_badge_lbl.setText(f"🖱️ Mouse: STEADY ({velocity:.0f} px/s)")
+                self.mouse_badge_lbl.setStyleSheet("color: #00f5d4; font-weight: bold;")
+            else:
+                self.mouse_badge_lbl.setText(f"🖱️ Mouse: ERRATIC ({velocity:.0f} px/s, {erraticness:.1f}e)")
+                self.mouse_badge_lbl.setStyleSheet("color: #f6d365; font-weight: bold;")
+
+    def on_clipboard_update(self, was_used: bool, total_changes: int):
+        """Handle clipboard activity updates."""
+        self.latest_clipboard_active = was_used
+        self.latest_clipboard_changes = total_changes
+        if hasattr(self, 'clipboard_badge_lbl'):
+            if was_used:
+                self.clipboard_badge_lbl.setText(f"📋 Clipboard: ACTIVE ({total_changes} changes)")
+                self.clipboard_badge_lbl.setStyleSheet("color: #00f5d4; font-weight: bold;")
+            else:
+                self.clipboard_badge_lbl.setText(f"📋 Clipboard: INACTIVE")
+                self.clipboard_badge_lbl.setStyleSheet("color: #8f94a8;")
+
     def on_status_message(self, message: str):
         pass
+
+    def on_agent_update(self, is_active: bool, summary: str, agents: list):
+        """Handle background AI agent updates."""
+        self.latest_agent_active = is_active
+        self.latest_agents_summary = summary
+        if hasattr(self, 'agent_badge_lbl'):
+            if is_active:
+                self.agent_badge_lbl.setText(f"⚡ AI Agents: ACTIVE ({summary})")
+                self.agent_badge_lbl.setStyleSheet("color: #00f5d4; font-weight: bold;")
+            else:
+                self.agent_badge_lbl.setText("⚡ AI Agents: Inactive / Idle")
+                self.agent_badge_lbl.setStyleSheet("color: #8f94a8;")
+
+    def on_quiz_solved(self, is_correct: bool, explanation: str):
+        """Called when user answers a placement quiz over Telegram on their phone."""
+        if is_correct:
+            self.engine.heal_focus(25.0)
+            self.focus_history.focused_time += 120.0
+            if hasattr(self, 'tray_icon') and self.tray_icon:
+                self.tray_icon.showMessage(
+                    "🐾 Pet Fed via Telegram!",
+                    "Placement Question Solved! +15 Mood, Focus Restored! ✨",
+                    QSystemTrayIcon.MessageIcon.Information,
+                    2500
+                )
+        else:
+            self.engine.penalize_focus(10.0)
+
+    def get_live_pet_state(self) -> dict:
+        """Returns live pet telemetry for Telegram companion bot."""
+        return {
+            "pet_type": getattr(self.pet_window, 'species', 'Cyber Pet'),
+            "mood": self.focus_history.get_recent_mood(),
+            "distraction_score": self.engine.distraction_score,
+            "level": self.engine.get_level(),
+            "streak": self.focus_history.get_current_streak(),
+            "agents_summary": self.latest_agents_summary,
+        }
 
     def on_frame_ready(self, frame):
         if not self.preview_check.isChecked():
@@ -597,15 +900,36 @@ class SettingsPanel(QWidget):
         self.preview_lbl.setPixmap(pix.scaled(self.preview_lbl.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
 
     def on_tick(self):
-        # Update Multimodal Fused Distraction Score
+        # Update Multimodal Fused Distraction Score with 8 Sensors
         score = self.engine.update_fused(
             is_vision_focused=self.latest_is_focused, 
             is_input_active=self.latest_input_active, 
-            is_mic_active=self.latest_mic_active, 
+            is_mic_active=self.latest_mic_active,
+            app_context=self.latest_app_context,
+            is_mouse_steady=self.latest_mouse_steady,
+            is_clipboard_active=self.latest_clipboard_active,
+            is_agent_active=self.latest_agent_active,
             dt=0.1
         )
         level = self.engine.get_level()
         state_name = self.engine.get_state_name()
+        is_focused = level == 0
+
+        # Update focus history (once per second to avoid flooding)
+        self.stats_tick_counter += 1
+        if self.stats_tick_counter >= 10:  # Every 10 ticks = 1 second
+            self.stats_tick_counter = 0
+            self.focus_history.add_sample(score)
+            self.focus_history.update_time(is_focused, 1.0)
+            self.update_statistics()
+            
+            # Calculate mood from recent focus history and pass to pet
+            # Uses rolling 2-minute window for responsive mood changes
+            mood_value = self.focus_history.get_recent_mood()
+            self.pet_window.set_mood(mood_value)
+            
+            # Update mood display
+            self.update_mood_display(mood_value)
 
         # Update Audio safeguard status
         is_silent = audio_guard.is_audio_silent_mode()
@@ -668,6 +992,60 @@ class SettingsPanel(QWidget):
             self.popup_spawn_ticks = 0
             self.clear_all_popups()
 
+    def update_statistics(self):
+        """Update the statistics panel with latest focus data."""
+        # Focus percentage
+        focus_pct = self.focus_history.get_focus_percentage()
+        self.stat_focus_val.setText(f"{focus_pct:.0f}%")
+        if focus_pct >= 80:
+            self.stat_focus_val.setStyleSheet("color: #00f5d4; font-size: 20px; font-weight: bold;")
+        elif focus_pct >= 50:
+            self.stat_focus_val.setStyleSheet("color: #f6d365; font-size: 20px; font-weight: bold;")
+        else:
+            self.stat_focus_val.setStyleSheet("color: #ff0844; font-size: 20px; font-weight: bold;")
+        
+        # Focus streak
+        streak_text = self.focus_history.get_current_streak()
+        self.stat_streak_val.setText(streak_text)
+        
+        # Session time
+        session_secs = int(time.time() - self.focus_history.session_start)
+        if session_secs < 60:
+            session_text = f"{session_secs}s"
+        elif session_secs < 3600:
+            session_text = f"{session_secs // 60}m {session_secs % 60}s"
+        else:
+            hours = session_secs // 3600
+            mins = (session_secs % 3600) // 60
+            session_text = f"{hours}h {mins}m"
+        self.stat_session_val.setText(session_text)
+        
+        # Draw mini history bar (simple colored blocks)
+        self.draw_history_bar()
+
+    def update_mood_display(self, mood_value: float):
+        """Update the mood indicator in the dashboard."""
+        if mood_value >= 85:
+            emoticon, name, color = "😄", "Ecstatic", "#ffd700"
+        elif mood_value >= 65:
+            emoticon, name, color = "🙂", "Happy", "#00f5d4"
+        elif mood_value >= 40:
+            emoticon, name, color = "😐", "Neutral", "#8f94a8"
+        elif mood_value >= 20:
+            emoticon, name, color = "😒", "Grumpy", "#4facfe"
+        else:
+            emoticon, name, color = "😤", "Angry", "#ff0844"
+        
+        self.mood_emoticon_lbl.setText(emoticon)
+        self.mood_name_lbl.setText(name)
+        self.mood_name_lbl.setStyleSheet(f"color: {color}; font-size: 11px; font-weight: bold;")
+
+    def draw_history_bar(self):
+        """Update the history bar widget with latest scores."""
+        if hasattr(self, 'history_bar') and self.history_bar:
+            self.history_bar.set_scores(self.focus_history.scores)
+            self.history_bar.update()
+
     def on_reset_score_clicked(self):
         self.engine.reset()
         self.clear_all_popups()
@@ -692,7 +1070,6 @@ class SettingsPanel(QWidget):
         self.active_popups.clear()
 
     def closeEvent(self, event):
-        # Minimize to System Tray daemon when top-right window 'X' is clicked
         if hasattr(self, 'tray_icon') and self.tray_icon and self.tray_icon.isVisible():
             self.hide()
             event.ignore()
@@ -706,9 +1083,66 @@ class SettingsPanel(QWidget):
         self.activity_worker.stop()
         self.mic_worker.stop()
         self.window_worker.stop()
+        if self.context_worker:
+            self.context_worker.stop()
+        if self.mouse_worker:
+            self.mouse_worker.stop()
+        if self.clipboard_worker:
+            self.clipboard_worker.stop()
         self.pet_window.close()
         self.screen_overlay.close()
         QApplication.quit()
+
+
+class HistoryBarWidget(QWidget):
+    """Custom widget that renders a color-coded focus history bar."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.scores = []
+        self.setMinimumHeight(16)
+        
+    def set_scores(self, scores):
+        self.scores = list(scores) if scores else []
+        
+    def paintEvent(self, event):
+        if not self.scores:
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        
+        bar_width = self.width()
+        bar_height = self.height()
+        num_samples = len(self.scores)
+        
+        if num_samples < 1 or bar_width <= 0:
+            painter.end()
+            return
+        
+        # Bar background
+        painter.fillRect(self.rect(), QColor(20, 22, 30))
+        
+        # Draw rounded rect clip
+        clip_path = QPainterPath()
+        clip_path.addRoundedRect(QRectF(self.rect()), 4, 4)
+        painter.setClipPath(clip_path)
+        
+        block_width = max(2, bar_width // num_samples)
+        
+        for i, score in enumerate(self.scores):
+            x = i * block_width
+            if score <= 20:
+                color = QColor(0, 245, 212, 180)  # Green
+            elif score <= 50:
+                color = QColor(79, 172, 254, 180)  # Blue
+            elif score <= 80:
+                color = QColor(246, 211, 101, 180)  # Yellow
+            else:
+                color = QColor(255, 8, 68, 180)  # Red
+            
+            painter.fillRect(QRect(x, 0, block_width, bar_height), QBrush(color))
+        
+        painter.end()
+
 
 def main():
     app = QApplication(sys.argv)
@@ -741,11 +1175,53 @@ def main():
     window_worker = WindowTrackerWorker()
     window_worker.start()
     
-    # Initialize Main Controller Settings Panel
-    settings_panel = SettingsPanel(engine, pet_window, screen_overlay, cv_worker, activity_worker, mic_worker, window_worker)
+    # Initialize new focus sensor workers
+    context_worker = ContextScannerWorker()
+    context_worker.start()
+    
+    mouse_worker = MouseAnalyticsWorker()
+    mouse_worker.start()
+    
+    # Initialize AI Agent Tracker & Telegram Companion Workers
+    quiz_manager = QuizManager()
+    agent_worker = AgentTrackerWorker()
+    agent_worker.start()
+
+    telegram_worker = TelegramBotWorker(quiz_manager)
+    telegram_worker.start()
+
+    # Start Hardware Sleep & Power Interceptor
+    power_monitor = PowerMonitor()
+    power_monitor.start()
+
+    # Initialize Main Controller Settings Panel with merged Awaken workers
+    settings_panel = SettingsPanel(
+        engine, pet_window, screen_overlay, cv_worker, activity_worker, mic_worker, window_worker,
+        context_worker=context_worker, mouse_worker=mouse_worker, clipboard_worker=clipboard_worker,
+        agent_worker=agent_worker, telegram_worker=telegram_worker
+    )
+
+    # Clean shutdown of workers
+    app.aboutToQuit.connect(agent_worker.stop)
+    app.aboutToQuit.connect(telegram_worker.stop)
+    app.aboutToQuit.connect(power_monitor.stop)
     
     # Click on Desktop Pet opens/toggles the Control Dashboard!
     pet_window.pet_clicked.connect(settings_panel.toggle_visibility)
+    
+    # Connect system events to pet idle reactions
+    last_window_title = ""
+    def on_window_changed_for_pet(title: str):
+        nonlocal last_window_title
+        if title != last_window_title:
+            last_window_title = title
+            pet_window.notify_window_changed()
+    window_worker.window_update.connect(on_window_changed_for_pet)
+    
+    def on_typing_for_pet(is_active: bool, idle_sec: float):
+        if is_active:
+            pet_window.notify_typing_detected()
+    activity_worker.activity_update.connect(on_typing_for_pet)
 
     # Check for --daemon or --minimized command line flag
     daemon_mode = "--daemon" in sys.argv or "--minimized" in sys.argv

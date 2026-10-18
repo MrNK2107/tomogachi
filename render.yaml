@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: awaken-sentinel
+    env: python
+    region: oregon
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn cloud_server:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
+      - key: HEARTBEAT_SECRET
+        sync: false
+      - key: OFFLINE_ASLEEP_THRESHOLD_MINUTES
+        value: "15"
+      - key: REMINDER_INTERVAL_MINUTES
+        value: "25"
+      - key: MAX_AWAY_REMINDERS
+        value: "3"

@@ -15,9 +15,8 @@ from pet_sprites import ProceduralPetWidget
 class PetWindow(QWidget):
     """
     Transparent, frameless overlay window containing the animated desktop pet.
-    Supports multiple pet species (Blob, Cat, Robo, Panda, Custom Image/Colors).
-    Moves towards the cursor (Level 1), knocks on the screen (Level 2), 
-    and wiggles/shakes violently (Level 3).
+    All pet rendering is delegated to ProceduralPetWidget from pet_sprites.py.
+    Supports Custom Image (CUSTOM) in addition to all procedural pets.
     """
     pet_clicked = pyqtSignal()
 
@@ -34,7 +33,6 @@ class PetWindow(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
 
-        
         # Fixed size for the pet bounding box
         self.setFixedSize(180, 180)
         
@@ -43,15 +41,15 @@ class PetWindow(QWidget):
         self.anim_tick = 0
         
         # Pet customization fields
-        self.pet_type = "BLOB"  # "BLOB", "CAT", "ROBO", "PANDA", "CUSTOM"
+        self.pet_type = "BLOB"  # "BLOB", "CAT", "DRAGON", "BOT", "PANDA", "CUSTOM"
         self.theme_name = "Tokyo Night"
         self.custom_primary = "#a18cd1"
         self.custom_secondary = "#fbc2eb"
         self.custom_pixmap = None
         self.custom_image_path = ""
 
-        # Procedural sprite renderer delegate
-        self.procedural_pet = ProceduralPetWidget(self.pet_type, self.theme_name, self)
+        # Procedural sprite renderer delegate - handles all pet drawing
+        self.procedural_pet = ProceduralPetWidget(self._map_pet_type(self.pet_type), self.theme_name, self)
         self.procedural_pet.hide()
         
         # Sleep particles (Zzz) for Level 0
@@ -62,16 +60,26 @@ class PetWindow(QWidget):
         self.bubble_timer = 0
         self.speech_phrases = [
             "Get back to work!",
+            "Focus up! 💪",
             "Distraction spotted!",
-            "Hey, look here!",
-            "Focused? Sure?",
-            "Eyes on the code!"
+            "Hey, look here! 👀",
+            "Eyes on the code! ",
+            "Don't zone out! ✨"
         ]
         
         # Knocking state variables for Level 2
         self.is_knocking = False
         self.knock_phase = 0.0
         self.last_knock_time = 0
+        
+        # Pet interaction state
+        self.is_hovered = False
+        self.pet_was_petted = False
+        self.pet_reaction_timer = 0
+        
+        # Cursor proximity detection
+        self._last_cursor_near = False
+        self._cursor_proximity_cooldown = 0
         
         # Target position on the screen
         screen_geo = QGuiApplication.primaryScreen().geometry()
@@ -86,7 +94,24 @@ class PetWindow(QWidget):
         # Smooth animation timer
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.update_animation)
-        self.timer.start(30) # ~33 FPS
+        self.timer.start(30)  # ~33 FPS
+
+    def _map_pet_type(self, pet_type: str) -> str:
+        """Map pet_gui pet types to pet_sprites character types."""
+        mapping = {
+            "BLOB": "BLOB",
+            "CAT": "CAT",
+            "CYBER CAT": "CAT",
+            "DRAGON": "DRAGON",
+            "TERMINAL DRAGON": "DRAGON",
+            "BOT": "BOT",
+            "MECHA": "BOT",
+            "MECHA BOT": "BOT",
+            "ROBO": "BOT",
+            "PANDA": "PANDA",
+            "CUSTOM": "CAT",  # Fallback - CUSTOM uses image rendering
+        }
+        return mapping.get(pet_type.upper(), "BLOB")
 
     def set_pet_style(self, pet_type: str = "BLOB", custom_image_path: str = "", custom_primary: str = "#a18cd1", custom_secondary: str = "#fbc2eb", theme_name: str = "Tokyo Night"):
         self.pet_type = pet_type.upper()
@@ -96,8 +121,9 @@ class PetWindow(QWidget):
         self.theme_name = theme_name
         self.custom_pixmap = None
 
+        sprite_type = self._map_pet_type(self.pet_type)
         if hasattr(self, 'procedural_pet') and self.procedural_pet:
-            self.procedural_pet.set_character(self.pet_type)
+            self.procedural_pet.set_character(sprite_type)
             self.procedural_pet.set_theme(self.theme_name)
 
         if self.pet_type == "CUSTOM" and custom_image_path and os.path.exists(custom_image_path):
@@ -110,7 +136,7 @@ class PetWindow(QWidget):
         if self.level != level:
             self.level = level
             self.anim_tick = 0
-            if hasattr(self, 'procedural_pet') and self.procedural_pet:
+            if hasattr(self, 'procedural_pet') and self.procedural_pet and self.pet_type != "CUSTOM":
                 self.procedural_pet.set_state(level)
             if level == 0:
                 self.sleep_particles = []
@@ -124,9 +150,57 @@ class PetWindow(QWidget):
             elif level == 3:
                 self.bubble_text = ""
 
+    def trigger_pet_reaction(self):
+        """Trigger a happy reaction when pet is clicked/petted."""
+        self.pet_was_petted = True
+        self.pet_reaction_timer = 40
+        if hasattr(self, 'procedural_pet') and self.procedural_pet:
+            self.procedural_pet.trigger_happy()
+        if self.screen_overlay:
+            pet_center = self.mapToGlobal(QPoint(90, 90))
+            self.screen_overlay.add_ripple(pet_center, color=QColor("#ff6b81"), max_radius=40)
+        self.update()
+
+    def set_mood(self, mood_value: float):
+        """Set the pet's mood based on focus history (0=angry, 100=ecstatic)."""
+        if hasattr(self, 'procedural_pet') and self.procedural_pet:
+            self.procedural_pet.set_mood(mood_value)
+
+    def notify_window_changed(self):
+        """Called when the active window changes - pet looks around curiously."""
+        if hasattr(self, 'procedural_pet') and self.procedural_pet and self.level == 0:
+            self.procedural_pet.trigger_window_change_reaction()
+
+    def notify_typing_detected(self):
+        """Called when typing is detected - pet perks up."""
+        if hasattr(self, 'procedural_pet') and self.procedural_pet and self.level == 0:
+            self.procedural_pet.trigger_typing_detected()
 
     def update_animation(self):
         self.anim_tick += 1
+        
+        # Update pet reaction timer
+        if self.pet_was_petted:
+            self.pet_reaction_timer -= 1
+            if self.pet_reaction_timer <= 0:
+                self.pet_was_petted = False
+        
+        # Cursor proximity detection (only at IDLE level)
+        if self.level == 0 and hasattr(self, 'procedural_pet') and self.procedural_pet:
+            self._cursor_proximity_cooldown = max(0, self._cursor_proximity_cooldown - 1)
+            cursor_pos = QCursor.pos()
+            dx = cursor_pos.x() - (self.x() + 90)
+            dy = cursor_pos.y() - (self.y() + 90)
+            dist = math.sqrt(dx*dx + dy*dy)
+            
+            is_near = dist < 120
+            if is_near and not self._last_cursor_near and self._cursor_proximity_cooldown == 0:
+                self._last_cursor_near = True
+                self.procedural_pet.trigger_cursor_near()
+                self._cursor_proximity_cooldown = 30
+            elif not is_near and self._last_cursor_near:
+                self._last_cursor_near = False
+                self.procedural_pet.trigger_cursor_far()
         
         # Get current position
         curr_x = self.x()
@@ -205,7 +279,7 @@ class PetWindow(QWidget):
                 self.knock_phase = 0.0
                 if self.screen_overlay:
                     pet_center = self.mapToGlobal(QPoint(90, 90))
-                    self.screen_overlay.add_ripple(pet_center)
+                    self.screen_overlay.add_ripple(pet_center, color=QColor("#4facfe"), max_radius=80)
                 audio_guard.play_alert_tone(frequency=660.0, duration=0.15, volume=0.2)
                 
             if self.is_knocking:
@@ -238,6 +312,16 @@ class PetWindow(QWidget):
                 
         self.update()
 
+    def enterEvent(self, event):
+        self.is_hovered = True
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self.is_hovered = False
+        self.update()
+        super().leaveEvent(event)
+
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
             self.drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
@@ -252,268 +336,56 @@ class PetWindow(QWidget):
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton and hasattr(self, 'click_start_pos'):
             move_dist = (event.globalPosition().toPoint() - self.click_start_pos).manhattanLength()
-            if move_dist < 5:  # Click without dragging
+            if move_dist < 5:  # Click without dragging = pet/interact
+                self.trigger_pet_reaction()
                 self.pet_clicked.emit()
             event.accept()
 
-
-    def paintEvent(self, event):
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        
-        # Breathing effect coordinates scaling
+    def draw_breathing_body(self, painter):
+        """Draw the breathing/shadow effect behind the pet."""
         scale_y = 1.0 + 0.05 * math.sin(self.anim_tick * 0.1) if self.level == 0 else 1.0 + 0.06 * math.sin(self.anim_tick * 0.25)
         scale_x = 1.0 - 0.02 * math.sin(self.anim_tick * 0.1) if self.level == 0 else 1.0 - 0.03 * math.sin(self.anim_tick * 0.25)
         
-        # Pet dimensions
         w = int(90 * scale_x)
-        h = int(90 * scale_y)
         
         # Shadow
         painter.setBrush(QBrush(QColor(0, 0, 0, 40)))
         painter.setPen(Qt.PenStyle.NoPen)
         painter.drawEllipse(QRect(90 - int(w/2), 140 - 10, w, 15))
-        
-        # Body coordinates
-        x = 90 - w // 2
-        y = 135 - h
-        
-        # Delegate to ProceduralPetWidget for procedural species (CAT, DRAGON, BOT/MECHA)
-        if self.pet_type in ["CAT", "CYBER CAT", "DRAGON", "TERMINAL DRAGON", "BOT", "MECHA", "MECHA BOT"]:
-            self.procedural_pet.render(painter)
-            self.draw_overlay_effects(painter, x, y, w, h)
-            return
 
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        
+        # Draw breathing shadow
+        self.draw_breathing_body(painter)
+        
         # Handle CUSTOM image rendering
         if self.pet_type == "CUSTOM" and self.custom_pixmap:
+            scale_y = 1.0 + 0.05 * math.sin(self.anim_tick * 0.1)
+            scale_x = 1.0 - 0.02 * math.sin(self.anim_tick * 0.1)
+            w = int(90 * scale_x)
+            h = int(90 * scale_y)
             scaled_pix = self.custom_pixmap.scaled(w, h, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
             px = 90 - scaled_pix.width() // 2
             py = 135 - scaled_pix.height()
             painter.drawPixmap(px, py, scaled_pix)
-            self.draw_overlay_effects(painter, x, y, w, h)
-            return
-
-
-        # Radial Color Gradient setup
-        gradient = QRadialGradient(90, 135 - h//2, int(w/2))
-        
-        if self.pet_type == "CUSTOM":
-            c1 = QColor(self.custom_primary)
-            c2 = QColor(self.custom_secondary)
-            if not c1.isValid(): c1 = QColor("#a18cd1")
-            if not c2.isValid(): c2 = QColor("#fbc2eb")
-        elif self.level == 0:  # Sleeping
-            c1, c2 = QColor("#a18cd1"), QColor("#fbc2eb")
-        elif self.level == 1:  # Waking
-            c1, c2 = QColor("#8fd3f4"), QColor("#84fab0")
-        elif self.level == 2:  # Warning
-            c1, c2 = QColor("#f6d365"), QColor("#fda085")
-        else:  # Total Zone-Out
-            c1, c2 = QColor("#ff0844"), QColor("#ffb199")
-
-        gradient.setColorAt(0.0, c1)
-        gradient.setColorAt(1.0, c2)
-
-        # Render Specific Pet Species Body & Ears
-        if self.pet_type == "ROBO":
-            # Cyber Robot Chassis
-            painter.setBrush(QBrush(QColor("#2a2e3d") if self.level < 2 else c1))
-            painter.setPen(QPen(QColor("#84fab0" if self.level < 2 else "#ff0844"), 2))
-            painter.drawRoundedRect(QRect(x, y, w, h), 16, 16)
-            
-            # Antenna
-            painter.drawLine(90, y, 90, y - 14)
-            antenna_color = QColor("#00ffcc") if (self.anim_tick // 10) % 2 == 0 else QColor("#ff0055")
-            painter.setBrush(QBrush(antenna_color))
-            painter.drawEllipse(85, y - 20, 10, 10)
-
-        elif self.pet_type == "PANDA":
-            # Panda Ears (Black circles)
-            painter.setBrush(QBrush(QColor("#202025")))
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.drawEllipse(QRect(x - 4, y - 6, 28, 28))
-            painter.drawEllipse(QRect(x + w - 24, y - 6, 28, 28))
-
-            # Panda Head (White / Cream Body)
-            painter.setBrush(QBrush(QColor("#f5f5f7")))
-            painter.setPen(QPen(QColor(180, 180, 180), 1.5))
-            painter.drawEllipse(QRect(x, y, w, h))
-
-        elif self.pet_type == "CAT":
-            # Cat Body
-            painter.setBrush(QBrush(gradient))
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.drawEllipse(QRect(x, y, w, h))
-
-            # Sharp Cat Ears
-            painter.setBrush(QBrush(c1))
-            # Left ear
-            cat_l = QPainterPath()
-            cat_l.moveTo(x + int(w * 0.15), y + int(h * 0.2))
-            cat_l.lineTo(x - 8, y - 16)
-            cat_l.lineTo(x + int(w * 0.4), y + int(h * 0.05))
-            cat_l.closeSubpath()
-            painter.drawPath(cat_l)
-            
-            # Inner pink ear
-            painter.setBrush(QBrush(QColor(255, 170, 190)))
-            cat_l_inner = QPainterPath()
-            cat_l_inner.moveTo(x + int(w * 0.18), y + int(h * 0.18))
-            cat_l_inner.lineTo(x - 2, y - 8)
-            cat_l_inner.lineTo(x + int(w * 0.35), y + int(h * 0.08))
-            cat_l_inner.closeSubpath()
-            painter.drawPath(cat_l_inner)
-
-            # Right ear
-            painter.setBrush(QBrush(c1))
-            cat_r = QPainterPath()
-            cat_r.moveTo(x + int(w * 0.85), y + int(h * 0.2))
-            cat_r.lineTo(x + w + 8, y - 16)
-            cat_r.lineTo(x + int(w * 0.6), y + int(h * 0.05))
-            cat_r.closeSubpath()
-            painter.drawPath(cat_r)
-            
-            # Right Inner pink ear
-            painter.setBrush(QBrush(QColor(255, 170, 190)))
-            cat_r_inner = QPainterPath()
-            cat_r_inner.moveTo(x + int(w * 0.82), y + int(h * 0.18))
-            cat_r_inner.lineTo(x + w + 2, y - 8)
-            cat_r_inner.lineTo(x + int(w * 0.65), y + int(h * 0.08))
-            cat_r_inner.closeSubpath()
-            painter.drawPath(cat_r_inner)
-
         else:
-            # BLOB / Default Slime
-            painter.setBrush(QBrush(gradient))
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.drawEllipse(QRect(x, y, w, h))
-            
-            # Blob ears
-            painter.setBrush(QBrush(c1))
-            path_l = QPainterPath()
-            path_l.moveTo(x + w * 0.2, y + h * 0.1)
-            path_l.lineTo(x - 5, y - 12)
-            path_l.lineTo(x + w * 0.05, y + h * 0.3)
-            path_l.closeSubpath()
-            painter.drawPath(path_l)
-            
-            path_r = QPainterPath()
-            path_r.moveTo(x + w * 0.8, y + h * 0.1)
-            path_r.lineTo(x + w + 5, y - 12)
-            path_r.lineTo(x + w * 0.95, y + h * 0.3)
-            path_r.closeSubpath()
-            painter.drawPath(path_r)
+            # Delegate all procedural rendering to ProceduralPetWidget
+            self.procedural_pet.render(painter)
+        
+        # Draw overlay effects on top
+        self.draw_overlay_effects(painter)
 
-
-        # Draw Face Details (Eyes, Mouth, Whiskers, Accessories)
-        eye_y = y + int(h * 0.45)
-        eye_w = int(w * 0.16)
-
-        # Panda Black Eye Patches
-        if self.pet_type == "PANDA":
-            painter.setBrush(QBrush(QColor("#202025")))
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.drawEllipse(QRect(x + int(w*0.14), eye_y - eye_w//2 - 2, int(eye_w*1.5), int(eye_w*1.5)))
-            painter.drawEllipse(QRect(x + int(w*0.58), eye_y - eye_w//2 - 2, int(eye_w*1.5), int(eye_w*1.5)))
-
-        # Robo Visor Overlay
-        if self.pet_type == "ROBO":
-            painter.setBrush(QBrush(QColor("#10121a")))
-            painter.setPen(QPen(QColor("#00ffcc"), 1))
-            painter.drawRoundedRect(QRect(x + int(w*0.12), eye_y - 12, int(w*0.76), 24), 6, 6)
-
-        # Eyes Drawing
-        if self.level == 0:
-            # Sleeping curves
-            painter.setPen(QPen(QColor("#00ffcc" if self.pet_type == "ROBO" else "#404050"), 3, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+    def draw_overlay_effects(self, painter):
+        """Draws sleep particles, dialogue speech bubbles, knocking paws, and hover glow."""
+        # Hover glow ring
+        if self.is_hovered:
+            alpha = int(60 + 40 * math.sin(self.anim_tick * 0.15))
             painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.drawArc(QRect(x + int(w*0.22), eye_y - eye_w//2, eye_w, eye_w), 180 * 16, 180 * 16)
-            painter.drawArc(QRect(x + int(w*0.62), eye_y - eye_w//2, eye_w, eye_w), 180 * 16, 180 * 16)
-        else:
-            # Open eyes
-            eye_color = QColor("#00ffcc") if self.pet_type == "ROBO" else Qt.GlobalColor.white
-            painter.setBrush(QBrush(eye_color))
-            painter.setPen(QPen(QColor(80, 80, 80, 100), 1))
-            painter.drawEllipse(QRect(x + int(w*0.20), eye_y - eye_w//2, eye_w, eye_w))
-            painter.drawEllipse(QRect(x + int(w*0.64), eye_y - eye_w//2, eye_w, eye_w))
-            
-            # Pupils
-            pupil_color = QColor("#ff0055") if self.pet_type == "ROBO" else Qt.GlobalColor.black
-            painter.setBrush(QBrush(pupil_color))
-            pupil_w = int(eye_w * 0.5)
-            
-            p_offset_x, p_offset_y = 0, 0
-            if self.level == 1:
-                cursor_pos = QCursor.pos()
-                pet_global = self.mapToGlobal(QPoint(90, 90))
-                dx = cursor_pos.x() - pet_global.x()
-                dy = cursor_pos.y() - pet_global.y()
-                dist = math.sqrt(dx*dx + dy*dy)
-                if dist > 0:
-                    p_offset_x = int(3 * dx / dist)
-                    p_offset_y = int(3 * dy / dist)
-            elif self.level == 2:
-                p_offset_x = int(1.5 * math.sin(self.anim_tick * 0.5))
-                p_offset_y = int(1.5 * math.cos(self.anim_tick * 0.5))
-            elif self.level == 3:
-                p_offset_x = int(3 * math.sin(self.anim_tick * 0.8))
-                p_offset_y = int(3 * math.cos(self.anim_tick * 0.8))
-                
-            painter.drawEllipse(QRect(x + int(w*0.20) + eye_w//2 - pupil_w//2 + p_offset_x, 
-                                      eye_y - pupil_w//2 + p_offset_y, pupil_w, pupil_w))
-            painter.drawEllipse(QRect(x + int(w*0.64) + eye_w//2 - pupil_w//2 + p_offset_x, 
-                                      eye_y - pupil_w//2 + p_offset_y, pupil_w, pupil_w))
-            
-            # Highlights
-            if self.pet_type != "ROBO":
-                painter.setBrush(QBrush(Qt.GlobalColor.white))
-                painter.setPen(Qt.PenStyle.NoPen)
-                painter.drawEllipse(QRect(x + int(w*0.20) + eye_w//2 - 1 + p_offset_x, eye_y - 3 + p_offset_y, 2, 2))
-                painter.drawEllipse(QRect(x + int(w*0.64) + eye_w//2 - 1 + p_offset_x, eye_y - 3 + p_offset_y, 2, 2))
-
-        # Cat Whiskers
-        if self.pet_type == "CAT":
-            painter.setPen(QPen(QColor(60, 60, 60, 180), 1.5))
-            # Left Whiskers
-            painter.drawLine(x + 4, eye_y + 4, x - 12, eye_y)
-            painter.drawLine(x + 4, eye_y + 8, x - 14, eye_y + 8)
-            # Right Whiskers
-            painter.drawLine(x + w - 4, eye_y + 4, x + w + 12, eye_y)
-            painter.drawLine(x + w - 4, eye_y + 8, x + w + 14, eye_y + 8)
-
-        # Mouth
-        mouth_y = y + int(h * 0.65)
-        painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.setPen(QPen(QColor(255, 255, 255, alpha), 2))
+            painter.drawEllipse(QRect(8, 8, 164, 164))
         
-        if self.level == 0:
-            painter.setPen(QPen(QColor(100, 100, 150, 150), 2))
-            painter.setBrush(QBrush(QColor(255, 255, 255, 80)))
-            painter.drawEllipse(QRect(90 - 4, mouth_y - 3, 8, 6))
-        elif self.level == 1:
-            painter.setPen(QPen(QColor(60, 60, 60, 200), 2.5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
-            painter.drawArc(QRect(90 - 7, mouth_y - 4, 14, 8), 180 * 16, 180 * 16)
-        elif self.level == 2:
-            painter.setPen(QPen(QColor(60, 60, 60, 200), 2.5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
-            painter.drawLine(90 - 6, mouth_y, 90 + 6, mouth_y)
-        else:
-            painter.setPen(QPen(QColor(60, 60, 60, 200), 2.5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
-            path_m = QPainterPath()
-            path_m.moveTo(90 - 8, mouth_y)
-            path_m.quadTo(90 - 4, mouth_y - 3, 90, mouth_y)
-            path_m.quadTo(90 + 4, mouth_y + 3, 90 + 8, mouth_y)
-            painter.drawPath(path_m)
-
-        # Cheeks
-        if self.level > 0 and self.pet_type != "ROBO":
-            painter.setBrush(QBrush(QColor(255, 120, 120, 90)))
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.drawEllipse(QRect(x + int(w*0.12), eye_y + 2, 7, 4))
-            painter.drawEllipse(QRect(x + int(w*0.78), eye_y + 2, 7, 4))
-
-        self.draw_overlay_effects(painter, x, y, w, h)
-
-    def draw_overlay_effects(self, painter, x, y, w, h):
-        """Draws sleep particles, dialogue speech bubbles, and knocking paws."""
         # Level 0 Zzz particles
         if self.level == 0:
             painter.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
@@ -521,28 +393,43 @@ class PetWindow(QWidget):
                 painter.setPen(QColor(180, 180, 255, int(p['alpha'])))
                 painter.drawText(int(p['x']), int(p['y']), p['text'])
 
-        # Level 1 Dialogue speech bubble
+        # Level 1 Dialogue speech bubble (enhanced with drop shadow style)
         if self.level == 1 and self.bubble_text:
-            bubble_w = 130
-            bubble_h = 30
+            bubble_w = 140
+            bubble_h = 32
             bx = 90 - bubble_w // 2
-            by = 8
+            by = 4
             
-            painter.setBrush(QBrush(QColor(255, 255, 255, 220)))
-            painter.setPen(QPen(QColor(180, 180, 180, 200), 1))
+            # Bubble shadow
+            painter.setBrush(QBrush(QColor(0, 0, 0, 60)))
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.drawRoundedRect(bx + 1, by + 2, bubble_w, bubble_h, 8, 8)
+            
+            # Bubble body with gradient
+            painter.setBrush(QBrush(QColor(255, 255, 255, 235)))
+            painter.setPen(QPen(QColor(200, 200, 220, 180), 1))
             painter.drawRoundedRect(bx, by, bubble_w, bubble_h, 8, 8)
             
+            # Pointer triangle
             pointer = QPolygonF([
-                QPointF(90.0, float(by + bubble_h + 5)),
-                QPointF(85.0, float(by + bubble_h)),
-                QPointF(95.0, float(by + bubble_h))
+                QPointF(90.0, float(by + bubble_h + 6)),
+                QPointF(83.0, float(by + bubble_h)),
+                QPointF(97.0, float(by + bubble_h))
             ])
-
+            painter.setBrush(QBrush(QColor(255, 255, 255, 235)))
+            painter.setPen(QPen(QColor(200, 200, 220, 180), 1))
             painter.drawPolygon(pointer)
             
-            painter.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
-            painter.setPen(QColor(50, 50, 50))
+            # Bubble text
+            painter.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
+            painter.setPen(QColor(40, 40, 60))
             painter.drawText(QRect(bx, by, bubble_w, bubble_h), Qt.AlignmentFlag.AlignCenter, self.bubble_text)
+            
+            # Emoji sparkles
+            if self.anim_tick % 30 < 15:
+                painter.setFont(QFont("Segoe UI", 14))
+                painter.setPen(QColor(255, 200, 50, 100))
+                painter.drawText(bx + bubble_w - 2, by - 4, "✨")
 
         # Level 2 Knocking Arm/Paw Overlay
         if self.level == 2 and self.is_knocking:
@@ -552,15 +439,16 @@ class PetWindow(QWidget):
             paw_grad.setColorAt(1, QColor("#8fd3f4"))
             
             painter.setBrush(QBrush(paw_grad))
-            painter.setPen(QPen(QColor(0,0,0,50), 1))
-            painter.drawEllipse(QRect(90 - 12, 135 - h - paw_y_offset, 24, 24))
+            painter.setPen(QPen(QColor(0, 0, 0, 50), 1.5))
+            painter.drawEllipse(QRect(90 - 14, 60 - paw_y_offset, 28, 22))
 
 class ScreenOverlay(QWidget):
     """
     Full screen visual effects overlay:
     - Click-through transparent window.
     - Level 2: Glass ripple effects when the pet knocks on the screen.
-    - Level 3: Slow flashing red overlay (Visual Blitz).
+    - Level 3: Slow flashing red overlay (Visual Blitz) with vignette.
+    - Pet interaction: Heart/color ripples when pet is petted.
     """
     def __init__(self):
         super().__init__()
@@ -579,27 +467,42 @@ class ScreenOverlay(QWidget):
         self.flash_alpha = 0.0
         self.flash_dir = 1
         self.ripples = []
+        self.anim_tick = 0
+        
+        # Vignette effect for Level 3
+        self.vignette_alpha = 0.0
         
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.update_overlay)
-        self.timer.start(30) # ~33 FPS
+        self.timer.start(30)  # ~33 FPS
 
     def set_level(self, level: int):
-        self.level = level
-        if level != 3:
-            self.flash_alpha = 0.0
+        if self.level != level:
+            self.level = level
+            self.anim_tick = 0
+            if level != 3:
+                self.flash_alpha = 0.0
+                self.vignette_alpha = 0.0
+            elif level == 3:
+                self.vignette_alpha = 0.4
 
-    def add_ripple(self, global_pos: QPoint):
+    def add_ripple(self, global_pos: QPoint, color: QColor = None, max_radius: int = 80):
+        if color is None:
+            color = QColor("#4facfe")
         local_pos = self.mapFromGlobal(global_pos)
         self.ripples.append({
             'x': local_pos.x(),
             'y': local_pos.y(),
             'radius': 5.0,
-            'max_radius': 80.0,
-            'alpha': 230.0
+            'max_radius': float(max_radius),
+            'alpha': 230.0,
+            'color': color,
+            'crack': max_radius > 50  # Only show cracks for larger ripples
         })
 
     def update_overlay(self):
+        self.anim_tick += 1
+        
         if self.level == 3:
             self.flash_alpha += self.flash_dir * 0.008
             if self.flash_alpha >= 0.16:
@@ -621,22 +524,47 @@ class ScreenOverlay(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         
+        # Level 3: Red flash + vignette
         if self.level == 3 and self.flash_alpha > 0.0:
+            # Red flash overlay
             painter.fillRect(self.rect(), QColor(230, 20, 20, int(self.flash_alpha * 255)))
             
+            # Dark vignette edges
+            if self.vignette_alpha > 0:
+                w, h = self.width(), self.height()
+                # Corner vignettes
+                vg = QRadialGradient(w/2, h/2, max(w, h) * 0.6)
+                vg.setColorAt(0.0, QColor(0, 0, 0, 0))
+                vg.setColorAt(0.7, QColor(0, 0, 0, 0))
+                vg.setColorAt(1.0, QColor(0, 0, 0, int(200 * self.vignette_alpha)))
+                painter.fillRect(self.rect(), QBrush(vg))
+            
+        # Level 2: Warning border pulse
+        if self.level == 2:
+            border_alpha = int(20 + 15 * math.sin(self.anim_tick * 0.15))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.setPen(QPen(QColor(255, 200, 50, border_alpha), 4))
+            painter.drawRect(self.rect().adjusted(2, 2, -2, -2))
+            
+        # Draw all active ripples
         for rip in self.ripples:
             alpha = int(rip['alpha'])
             r = int(rip['radius'])
             rx = int(rip['x'])
             ry = int(rip['y'])
+            color = rip['color']
             
+            # Outer ring
             painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.setPen(QPen(QColor(100, 200, 255, alpha), 2))
+            painter.setPen(QPen(QColor(color.red(), color.green(), color.blue(), alpha), 2))
             painter.drawEllipse(QPoint(rx, ry), r, r)
-            painter.setPen(QPen(QColor(150, 220, 255, int(alpha * 0.6)), 1))
+            
+            # Inner ring
+            painter.setPen(QPen(QColor(color.red(), color.green(), color.blue(), int(alpha * 0.6)), 1))
             painter.drawEllipse(QPoint(rx, ry), int(r * 0.75), int(r * 0.75))
             
-            if r > 20:
+            # Crack-style lines for knock ripples
+            if rip['crack'] and r > 20:
                 painter.setPen(QPen(QColor(255, 255, 255, int(alpha * 0.8)), 1.5))
                 num_cracks = 6
                 for i in range(num_cracks):

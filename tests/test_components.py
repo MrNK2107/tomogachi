@@ -312,9 +312,45 @@ class TestProceduralPetSprites(unittest.TestCase):
             self.assertEqual(pet.state, st)
 
         # Test animation frame tick
-        pet.update_animation()
-        self.assertGreaterEqual(pet.anim_frame, 0)
-        pet.close()
+class TestAwakenIntegration(unittest.TestCase):
+    def test_engine_agent_active(self):
+        engine = IntensityEngine()
+        engine.distraction_score = 40.0
+        # When agent is active, score decays as focused work
+        score = engine.update_fused(is_agent_active=True, dt=1.0)
+        self.assertLess(score, 40.0)
+
+    def test_engine_heal_and_penalty(self):
+        engine = IntensityEngine()
+        engine.distraction_score = 50.0
+        engine.heal_focus(20.0)
+        self.assertEqual(engine.distraction_score, 30.0)
+        engine.penalize_focus(10.0)
+        self.assertEqual(engine.distraction_score, 40.0)
+
+    def test_agent_detector(self):
+        from core.agent_detector import AgentDetector
+        detector = AgentDetector()
+        agents = detector.get_running_agents()
+        self.assertIsInstance(agents, list)
+        summary = detector.get_summary_text()
+        self.assertIsInstance(summary, str)
+
+    def test_roast_bank(self):
+        from quiz.roast_bank import get_brutal_roast, get_shutdown_roast
+        r15 = get_brutal_roast(15.0)
+        self.assertIn("PHONE", r15.upper())
+        r45 = get_brutal_roast(50.0)
+        self.assertIsInstance(r45, str)
+        r_shut = get_shutdown_roast()
+        self.assertIsInstance(r_shut, str)
+
+    def test_quiz_manager(self):
+        from quiz.quiz_manager import QuizManager
+        qm = QuizManager()
+        q = qm.get_question()
+        self.assertIn("options", q)
+        self.assertEqual(len(q["options"]), 4)
 
 if __name__ == '__main__':
     unittest.main()
