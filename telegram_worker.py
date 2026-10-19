@@ -110,17 +110,24 @@ class TelegramBotWorker(QThread):
         # Natural language processor for free-form conversation & commands
         self.app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_natural_language))
 
-        await self.app.initialize()
-        await self.app.start()
-        await self.app.updater.start_polling()
-        logger.info("Telegram Bot worker polling started.")
+        try:
+            await self.app.initialize()
+            await self.app.start()
+            await self.app.updater.start_polling(drop_pending_updates=True)
+            logger.info("Telegram Bot worker polling started.")
+        except Exception as e:
+            logger.warning(f"Local Telegram polling paused (handled by cloud server): {e}")
 
         while self.running:
             await asyncio.sleep(1)
 
-        await self.app.updater.stop()
-        await self.app.stop()
-        await self.app.shutdown()
+        try:
+            if hasattr(self.app, 'updater') and self.app.updater and self.app.updater.running:
+                await self.app.updater.stop()
+            await self.app.stop()
+            await self.app.shutdown()
+        except Exception:
+            pass
 
     def stop(self):
         self.running = False
