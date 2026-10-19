@@ -88,6 +88,8 @@ class TelegramBotWorker(QThread):
         self.app.add_handler(CommandHandler("flash", self._cmd_strobe))
         self.app.add_handler(CommandHandler("open", self._cmd_open))
         self.app.add_handler(CommandHandler("lock", self._cmd_lock))
+        self.app.add_handler(CommandHandler("phone", self._cmd_phone))
+        self.app.add_handler(CommandHandler("mobile", self._cmd_phone))
         self.app.add_handler(CommandHandler("focus", self._cmd_focus))
         self.app.add_handler(CommandHandler("feed", self._cmd_feed))
         self.app.add_handler(CommandHandler("poke", self._cmd_poke))
@@ -320,8 +322,64 @@ class TelegramBotWorker(QThread):
         await update.message.reply_text(f"🚀 *Opened `{target}` on your laptop browser!*", parse_mode="Markdown")
 
     async def _cmd_lock(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        self.pet_action.emit("lock")
-        await update.message.reply_text("🔒 *Workstation Locked!* Windows session has been locked.", parse_mode="Markdown")
+        await update.message.reply_text("🔒 *Workstation locking is disabled* per your safety configuration to protect background tasks and active sessions.", parse_mode="Markdown")
+
+    async def _cmd_phone(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Manages out-of-band mobile phone alerts."""
+        from core.phone_alert import phone_alert_manager
+
+        if context.args:
+            sub = context.args[0].lower()
+            if sub == "test":
+                phone_alert_manager.send_phone_alert(
+                    "⚡ TEST PHONE BUZZ!",
+                    "Your Awaken Sentinel mobile nuisance is successfully connected and buzzing!",
+                    priority=5,
+                    bypass_cooldown=True
+                )
+                await update.message.reply_text("📳 *Dispatched test buzz to your phone!* Check your ntfy app.", parse_mode="Markdown")
+                return
+            elif sub == "topic" and len(context.args) > 1:
+                topic = context.args[1]
+                phone_alert_manager.set_topic(topic)
+                await update.message.reply_text(f"✅ *Updated ntfy topic to:* `{topic}`", parse_mode="Markdown")
+                return
+            elif sub == "webhook" and len(context.args) > 1:
+                wh = context.args[1]
+                phone_alert_manager.set_webhook(wh)
+                await update.message.reply_text(f"✅ *Configured custom mobile webhook:* `{wh}`", parse_mode="Markdown")
+                return
+
+        topic = phone_alert_manager.config.get("ntfy_topic", "awaken_phantom_832313259")
+        ntfy_url = phone_alert_manager.get_ntfy_url()
+        webhook_status = "Configured" if phone_alert_manager.config.get("webhook_url") else "Not configured"
+
+        keyboard = [
+            [
+                InlineKeyboardButton("⚡ Buzz My Phone Now", callback_data="btn_phone_test"),
+                InlineKeyboardButton("🚨 Mobile Alarm Web", url="https://awaken-sentinel.onrender.com/mobile-alarm"),
+            ],
+            [
+                InlineKeyboardButton("📲 Open ntfy Topic", url=ntfy_url),
+            ]
+        ]
+        text = (
+            "📱 *MOBILE PHONE NUISANCE & ALERTS* 📳\n\n"
+            "When you're away from your laptop, Awaken Sentinel vibrates and alerts your phone!\n\n"
+            f"• *ntfy Topic:* `{topic}`\n"
+            f"• *ntfy Link:* [{ntfy_url}]({ntfy_url})\n"
+            f"• *Custom Webhook (MacroDroid):* `{webhook_status}`\n\n"
+            "🛠 *How to set up in 30 seconds:*\n"
+            "1. Install the free **ntfy** app (Android / iOS / Web PWA).\n"
+            "2. Tap **+** and subscribe to: `" + topic + "`\n"
+            "3. Whenever you are away, your phone will vibrate with high priority!\n\n"
+            "💡 *Optional (Android):* Install **MacroDroid** to trigger screen-on, flashlight, or continuous vibration via `/phone webhook <url>`.\n\n"
+            "Commands:\n"
+            "• `/phone test` - Test phone vibration immediately\n"
+            "• `/phone topic <name>` - Change topic name\n"
+            "• `/phone webhook <url>` - Set MacroDroid webhook URL"
+        )
+        await update.message.reply_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard), disable_web_page_preview=True)
 
     async def _cmd_strobe(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         self.pet_action.emit("strobe")
@@ -451,10 +509,10 @@ class TelegramBotWorker(QThread):
     async def _cmd_alarm(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         self.pet_action.emit("alarm")
         await update.message.reply_text(
-            "🚨 *DESK ALARM TRIGGERED!* 🔊\n\n"
-            "• Desktop pet is knocking and alert siren is sounding!\n"
+            "🚨 *DESK ALARM TRIGGERED!* 📳\n\n"
             "• Monitor screen border is strobing red neon!\n"
-            "• SAPI Voice alert speaking attention warning on laptop!",
+            "• Mobile phone buzz alert dispatched via ntfy!\n"
+            "• Zero laptop audio (safe for class/lecture).",
             parse_mode="Markdown"
         )
 
@@ -584,6 +642,15 @@ class TelegramBotWorker(QThread):
         elif data == "btn_alarm":
             self.pet_action.emit("alarm")
             await query.message.reply_text("🚨 *Desk Alarm Triggered!*", parse_mode="Markdown")
+        elif data == "btn_phone_test":
+            from core.phone_alert import phone_alert_manager
+            phone_alert_manager.send_phone_alert(
+                "⚡ TEST PHONE BUZZ!",
+                "Your Awaken Sentinel mobile alert is active and vibrating!",
+                priority=5,
+                bypass_cooldown=True
+            )
+            await query.message.reply_text("📳 *Dispatched test buzz to your phone!*", parse_mode="Markdown")
         elif data == "btn_feed":
             self.pet_action.emit("feed")
             await query.message.reply_text("🥩 *Fed your pet!* (+10 Mood)", parse_mode="Markdown")
@@ -726,10 +793,14 @@ class TelegramBotWorker(QThread):
             await update.message.reply_text("🚨 *Screen Alert Strobe Triggered!* Pulsing red neon alert border on laptop monitor.", parse_mode="Markdown")
             return
 
-        # 6. Lock Workstation
+        # 6. Lock Workstation (Disabled per user safety constraint)
         if any(w in lower for w in ["lock pc", "lock laptop", "lock screen", "lock workstation"]):
-            self.pet_action.emit("lock")
-            await update.message.reply_text("🔒 *Laptop Screen Locked!* Windows workstation locked.", parse_mode="Markdown")
+            await update.message.reply_text("🔒 *Workstation locking is disabled* per your safety configuration to protect background tasks and active sessions.", parse_mode="Markdown")
+            return
+
+        # 6.5 Mobile Phone Nuisance & Alerts
+        if any(w in lower for w in ["test phone", "buzz phone", "buzz my phone", "mess with my phone", "phone alert", "vibrate phone", "phone"]):
+            await self._cmd_phone(update, context)
             return
 
         # 7. Browser Launchers
@@ -780,7 +851,7 @@ class TelegramBotWorker(QThread):
             ],
             [
                 InlineKeyboardButton("📸 Desktop Screenshot", callback_data="btn_snap"),
-                InlineKeyboardButton("🚨 Desk Alarm", callback_data="btn_alarm"),
+                InlineKeyboardButton("⚡ Buzz My Phone", callback_data="btn_phone_test"),
             ],
             [
                 InlineKeyboardButton("💻 Open LeetCode", callback_data="btn_open_leetcode"),

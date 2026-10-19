@@ -5,6 +5,7 @@ from datetime import datetime
 from typing import Optional, Dict, Any
 import config
 from quiz.roast_bank import get_brutal_roast, get_shutdown_roast
+from core.phone_alert import phone_alert_manager
 
 logger = logging.getLogger("CloudSentinel")
 
@@ -138,6 +139,9 @@ class CloudSentinel:
 
             # Send quiz poll
             await self.telegram.send_quiz()
+
+            # Trigger out-of-band mobile buzz & push alert
+            phone_alert_manager.trigger_asleep_phone_nuisance(offline_minutes)
         except Exception as e:
             logger.error(f"Failed to send asleep roast from cloud: {e}")
 

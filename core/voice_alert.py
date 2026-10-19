@@ -14,7 +14,7 @@ class VoiceAlert:
     grab user attention when deep distraction or alarm conditions occur.
     """
 
-    def __init__(self, enabled: bool = True):
+    def __init__(self, enabled: bool = False):
         self.enabled = enabled
         self._speech_lock = threading.Lock()
         self._is_speaking = False
@@ -23,8 +23,8 @@ class VoiceAlert:
         """Speaks phrase asynchronously via Windows Text-to-Speech (SAPI)."""
         if not self.enabled or sys.platform != "win32":
             return
-        if not force and audio_guard.is_audio_silent_mode():
-            # Respect silent/speaker mode constraints unless forced
+        if audio_guard.is_audio_silent_mode():
+            # Completely respect silent/class/lecture mode
             return
 
         def _worker():
@@ -56,7 +56,7 @@ class VoiceAlert:
         def _worker():
             try:
                 # System audio chime fallback
-                if sys.platform == "win32" and force:
+                if sys.platform == "win32" and force and self.enabled:
                     try:
                         import ctypes
                         ctypes.windll.user32.MessageBeep(0x00000010)  # MB_ICONHAND / system critical alert

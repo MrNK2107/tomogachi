@@ -32,6 +32,7 @@ from quiz.quiz_manager import QuizManager
 from core.git_tracker import GitTracker
 from core.voice_alert import VoiceAlert
 from core.system_sentinel import SystemSentinel
+from core.phone_alert import phone_alert_manager
 
 class FocusHistory:
     """Tracks focus scores over time for statistics display."""
@@ -936,30 +937,31 @@ class SettingsPanel(QWidget):
             else:
                 webbrowser.open(f"https://{target}")
         elif action == "lock":
-            import ctypes
-            if sys.platform == "win32":
-                try:
-                    ctypes.windll.user32.LockWorkStation()
-                except Exception:
-                    pass
+            # Disabled per user safety constraint (no locking of workstation)
+            pass
         elif action == "alarm":
             self.pet_window.show()
             self.pet_window.trigger_alarm_animation()
             self.screen_overlay.trigger_strobe_alert(duration_sec=4.0, color="#ff0844")
-            self.voice_alert.play_tone("siren", force=True)
-            self.voice_alert.speak("Attention! Wake up and focus on your work!", force=True)
+            # Zero laptop audio (quiet in class/lecture)
+            # Physical mobile phone buzz & push alert
+            phone_alert_manager.send_phone_alert(
+                "🚨 DESK ALARM TRIGGERED!",
+                "Desk alarm triggered from companion! Your phone is buzzing.",
+                priority=5,
+                bypass_cooldown=True
+            )
             if hasattr(self, 'tray_icon') and self.tray_icon:
                 self.tray_icon.showMessage(
-                    "🚨 DESK ALARM TRIGGERED VIA PHONE!",
-                    "Telegram companion sounded desk siren and screen alert!",
-                    QSystemTrayIcon.MessageIcon.Critical,
-                    6000
+                    "🚨 DESK ALARM TRIGGERED!",
+                    "Visual screen alert strobe and mobile phone buzz dispatched!",
+                    QSystemTrayIcon.MessageIcon.Warning,
+                    4000
                 )
         elif action == "feed":
             self.engine.heal_focus(20.0)
             self.pet_window.show()
             self.pet_window.trigger_feed_animation()
-            self.voice_alert.play_tone("happy")
             if hasattr(self, 'tray_icon') and self.tray_icon:
                 self.tray_icon.showMessage(
                     "🐾 Pet Fed via Telegram!",
@@ -970,14 +972,12 @@ class SettingsPanel(QWidget):
         elif action == "poke":
             self.pet_window.show()
             self.pet_window.trigger_poke_animation()
-            self.voice_alert.play_tone("warning")
         elif action.startswith("focus:"):
             try:
                 val = float(action.split(":", 1)[1])
                 self.engine.heal_focus(val)
                 self.pet_window.show()
                 self.pet_window.show_custom_bubble(f"Focus Sprint +{int(val)}m! ✨", 120)
-                self.voice_alert.play_tone("happy")
             except Exception:
                 pass
         elif action == "boss":
@@ -986,14 +986,12 @@ class SettingsPanel(QWidget):
             self.pet_window.show_custom_bubble("🚨 BOSS APPROACHING! 🚨", 150)
             self.pet_window.set_level(3)
             self.screen_overlay.trigger_strobe_alert(duration_sec=3.0, color="#ff0844")
-            self.voice_alert.speak("Boss mode activated. Focus immediately.", force=True)
         elif action == "sound:off":
             self.voice_alert.enabled = False
             self.pet_window.show_custom_bubble("🔇 Audio Muted", 80)
         elif action == "sound:on":
-            self.voice_alert.enabled = True
-            self.pet_window.show_custom_bubble("🔊 Audio Enabled", 80)
-            self.voice_alert.play_tone("happy")
+            self.voice_alert.enabled = False  # Keep muted per constraint
+            self.pet_window.show_custom_bubble("🔇 Audio Disabled (Class Mode)", 80)
 
     def capture_desktop_screenshot(self) -> bytes:
         """Captures the current desktop screen and returns JPEG image bytes."""
@@ -1208,6 +1206,7 @@ class SettingsPanel(QWidget):
             if self.away_alert_tick_counter == 1 or self.away_alert_tick_counter % 9000 == 0:
                 if self.telegram_worker:
                     self.telegram_worker.dispatch_away_alert(idle_min, self.latest_agents_summary)
+                phone_alert_manager.trigger_away_phone_nuisance(idle_min, self.latest_agents_summary)
         else:
             self.away_alert_tick_counter = 0
 
@@ -1374,7 +1373,7 @@ def main():
     # Initialize Core Engines & Sentinels
     engine = IntensityEngine()
     git_tracker = GitTracker()
-    voice_alert = VoiceAlert(enabled=True)
+    voice_alert = VoiceAlert(enabled=False)
     idle_det = IdleDetector()
     agent_det = AgentDetector()
     system_sentinel = SystemSentinel(

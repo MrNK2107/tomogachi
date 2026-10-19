@@ -459,6 +459,44 @@ class TestAwakenIntegration(unittest.TestCase):
         root_data = root_resp.json()
         self.assertEqual(root_data.get("active_window"), "PyCharm")
 
+        # Mobile alarm endpoint
+        mobile_resp = client.get("/mobile-alarm")
+        self.assertEqual(mobile_resp.status_code, 200)
+        self.assertIn("vibrate", mobile_resp.text)
+        self.assertIn("AWAY FROM LAPTOP", mobile_resp.text)
+
+        # Action endpoint
+        act_resp = client.post("/api/action", json={"action": "test_act"})
+        self.assertEqual(act_resp.status_code, 200)
+        self.assertTrue(act_resp.json().get("ok"))
+
+    def test_phone_alert_manager(self):
+        from core.phone_alert import PhoneAlertManager
+        mgr = PhoneAlertManager()
+        self.assertTrue(mgr.config["enabled"])
+        self.assertIn("ntfy.sh", mgr.get_ntfy_url())
+        
+        # Test topic and webhook setters
+        mgr.set_topic("test_topic_123")
+        self.assertIn("test_topic_123", mgr.get_ntfy_url())
+        mgr.set_webhook("https://trigger.macrodroid.com/test")
+        self.assertEqual(mgr.config["webhook_url"], "https://trigger.macrodroid.com/test")
+
+        # Test away alerts (mocking requests.post)
+        with patch("requests.post") as mock_post:
+            mock_post.return_value.status_code = 200
+            res1 = mgr.trigger_away_phone_nuisance(20.0, "Claude Code")
+            self.assertTrue(res1)
+            self.assertTrue(mock_post.called)
+
+    def test_voice_alert_silent_constraint(self):
+        from core.voice_alert import VoiceAlert
+        va = VoiceAlert(enabled=False)
+        self.assertFalse(va.enabled)
+        # Should cleanly return without sound
+        va.speak("Should be silent", force=True)
+        va.play_tone("siren", force=True)
+
 if __name__ == '__main__':
     unittest.main()
 
