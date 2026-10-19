@@ -287,6 +287,15 @@ class TestMultimodalFusion(unittest.TestCase):
             self.assertEqual(worker.sensitivity_preset, preset)
 
 class TestProceduralPetSprites(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        from PyQt6.QtWidgets import QApplication
+        import sys
+        if not QApplication.instance():
+            cls.app = QApplication(sys.argv)
+        else:
+            cls.app = QApplication.instance()
+
     def test_procedural_pet_widget(self):
         from pet_sprites import ProceduralPetWidget, PALETTES
         
@@ -313,6 +322,15 @@ class TestProceduralPetSprites(unittest.TestCase):
 
         # Test animation frame tick
 class TestAwakenIntegration(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        from PyQt6.QtWidgets import QApplication
+        import sys
+        if not QApplication.instance():
+            cls.app = QApplication(sys.argv)
+        else:
+            cls.app = QApplication.instance()
+
     def test_engine_agent_active(self):
         engine = IntensityEngine()
         engine.distraction_score = 40.0
