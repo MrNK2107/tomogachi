@@ -172,4 +172,3 @@ class ContextScannerWorker(QThread):
     def stop(self):
         self.running = False
         self.wait()
-"""

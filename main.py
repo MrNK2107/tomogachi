@@ -1201,10 +1201,35 @@ def main():
         agent_worker=agent_worker, telegram_worker=telegram_worker
     )
 
+    # Record PID for status and stop utilities
+    pid_file = config.DATA_DIR / "awaken.pid"
+    try:
+        pid_file.write_text(str(os.getpid()), encoding="utf-8")
+    except Exception:
+        pass
+
+    def cleanup_pid():
+        try:
+            if pid_file.exists():
+                pid_file.unlink()
+        except Exception:
+            pass
+
     # Clean shutdown of workers
+    app.aboutToQuit.connect(cleanup_pid)
     app.aboutToQuit.connect(agent_worker.stop)
     app.aboutToQuit.connect(telegram_worker.stop)
     app.aboutToQuit.connect(power_monitor.stop)
+
+    # Start periodic heartbeat to cloud server if configured
+    if config.CLOUD_SERVER_URL:
+        idle_det = IdleDetector()
+        agent_det = AgentDetector()
+        heartbeat_client = HeartbeatClient(idle_det, agent_det)
+        heartbeat_timer = QTimer()
+        heartbeat_timer.timeout.connect(heartbeat_client.send_heartbeat)
+        heartbeat_timer.start(config.HEARTBEAT_INTERVAL_SECONDS * 1000)
+        QTimer.singleShot(1000, heartbeat_client.send_heartbeat)
     
     # Click on Desktop Pet opens/toggles the Control Dashboard!
     pet_window.pet_clicked.connect(settings_panel.toggle_visibility)
