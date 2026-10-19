@@ -104,6 +104,7 @@ def set_windows_autostart(enable: bool) -> bool:
             if enable:
                 vbs_content = (
                     'Set WshShell = CreateObject("WScript.Shell")\r\n'
+                    f'WshShell.CurrentDirectory = "{os.path.dirname(run_script)}"\r\n'
                     f'WshShell.Run """{python_exe}"" ""{run_script}"" --daemon", 0, False\r\n'
                 )
                 with open(vbs_path, "w", encoding="utf-8") as f:
