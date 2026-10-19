@@ -17,12 +17,17 @@ class IdleDetector:
 
     def get_idle_seconds(self) -> float:
         """Returns the number of seconds since the last mouse or keyboard input."""
-        if not ctypes.windll.user32.GetLastInputInfo(ctypes.byref(self._last_input_info)):
+        if not hasattr(ctypes, "windll"):
             return 0.0
+        try:
+            if not ctypes.windll.user32.GetLastInputInfo(ctypes.byref(self._last_input_info)):
+                return 0.0
 
-        current_tick = ctypes.windll.kernel32.GetTickCount()
-        elapsed_ms = (current_tick - self._last_input_info.dwTime) & 0xFFFFFFFF
-        return elapsed_ms / 1000.0
+            current_tick = ctypes.windll.kernel32.GetTickCount()
+            elapsed_ms = (current_tick - self._last_input_info.dwTime) & 0xFFFFFFFF
+            return elapsed_ms / 1000.0
+        except Exception:
+            return 0.0
 
     def get_idle_minutes(self) -> float:
         """Returns the number of minutes since the last mouse or keyboard input."""
