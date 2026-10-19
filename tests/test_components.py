@@ -494,6 +494,64 @@ class TestAwakenIntegration(unittest.TestCase):
                     self.assertTrue(res1)
                     self.assertTrue(mock_post.called)
 
+    def test_phone_alert_modes_and_quiet_hours(self):
+        import tempfile
+        import os
+        import datetime
+        from core.phone_alert import PhoneAlertManager
+        with tempfile.TemporaryDirectory() as tmpdir:
+            temp_cfg = os.path.join(tmpdir, "phone_config.json")
+            with patch("core.phone_alert.CONFIG_PATH", temp_cfg):
+                mgr = PhoneAlertManager()
+                # Disable quiet hours initially to test explicit modes
+                mgr.set_quiet_hours("23:00", "07:30", enabled=False)
+
+                # 1. Sleep mode
+                mgr.sleep_mode(hours=8)
+                muted, reason = mgr.is_muted()
+                self.assertTrue(muted)
+                self.assertIn("Sleep Mode", reason)
+
+                # 2. Resume clears sleep mode
+                mgr.resume()
+                muted, _ = mgr.is_muted()
+                self.assertFalse(muted)
+
+                # 3. Class mode
+                mgr.class_mode(minutes=45)
+                muted, reason = mgr.is_muted()
+                self.assertTrue(muted)
+                self.assertIn("Class Mode", reason)
+
+                # 4. Resume clears class mode
+                mgr.resume()
+                muted, _ = mgr.is_muted()
+                self.assertFalse(muted)
+
+                # 5. Quiet hours check
+                mgr.set_quiet_hours("23:00", "07:30", enabled=True)
+                # 23:45 (inside quiet hours across midnight)
+                self.assertTrue(mgr.is_in_quiet_hours(now_time=datetime.time(23, 45)))
+                muted, reason = mgr.is_muted(now_time=datetime.time(23, 45))
+                self.assertTrue(muted)
+                self.assertIn("Night Quiet Hours", reason)
+
+                # 04:30 (inside quiet hours across midnight)
+                self.assertTrue(mgr.is_in_quiet_hours(now_time=datetime.time(4, 30)))
+
+                # 14:00 (outside quiet hours)
+                self.assertFalse(mgr.is_in_quiet_hours(now_time=datetime.time(14, 0)))
+                muted, _ = mgr.is_muted(now_time=datetime.time(14, 0))
+                self.assertFalse(muted)
+
+                # 6. Muted suppression in trigger_away_phone_nuisance
+                mgr.sleep_mode(hours=8)
+                with patch("requests.post") as mock_post:
+                    # When muted, trigger_away_phone_nuisance returns False and does not post
+                    res = mgr.trigger_away_phone_nuisance(30.0, "Active agents")
+                    self.assertFalse(res)
+                    self.assertFalse(mock_post.called)
+
     def test_voice_alert_silent_constraint(self):
         from core.voice_alert import VoiceAlert
         va = VoiceAlert(enabled=False)

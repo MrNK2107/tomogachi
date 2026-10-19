@@ -18,6 +18,11 @@ DEFAULT_PHONE_CONFIG = {
     "vibrate_pattern": "1000,300,1000,300,1000,500,2000",
     "last_alert_time": 0.0,
     "cooldown_seconds": 300.0,  # 5 minutes minimum between buzzes to avoid spam
+    "snooze_until": 0.0,
+    "snooze_reason": "",
+    "quiet_hours_enabled": True,
+    "quiet_hours_start": "23:00",  # 11:00 PM
+    "quiet_hours_end": "07:30",    # 7:30 AM
 }
 
 class PhoneAlertManager:
@@ -72,6 +77,72 @@ class PhoneAlertManager:
         server = self.config.get("ntfy_server", "https://ntfy.sh").rstrip("/")
         return f"{server}/{topic}"
 
+    def is_in_quiet_hours(self, now_time=None) -> bool:
+        """Checks if current local time is within night sleep quiet hours."""
+        if not self.config.get("quiet_hours_enabled", True):
+            return False
+        import datetime
+        if now_time is None:
+            now_time = datetime.datetime.now().time()
+        try:
+            start_parts = [int(p) for p in self.config.get("quiet_hours_start", "23:00").split(":")]
+            end_parts = [int(p) for p in self.config.get("quiet_hours_end", "07:30").split(":")]
+            start_time = datetime.time(start_parts[0], start_parts[1])
+            end_time = datetime.time(end_parts[0], end_parts[1])
+            if start_time <= end_time:
+                return start_time <= now_time <= end_time
+            else:
+                return now_time >= start_time or now_time <= end_time
+        except Exception as e:
+            logger.error(f"Error checking quiet hours: {e}")
+            return False
+
+    def is_muted(self, now_time=None) -> tuple[bool, str]:
+        """Returns (is_muted, reason) if phone alerts are currently silenced."""
+        if not self.config.get("enabled", True):
+            return True, "Phone alerts are turned OFF"
+        
+        now = time.time()
+        snooze_until = self.config.get("snooze_until", 0.0)
+        if now < snooze_until:
+            remaining_mins = max(1, int((snooze_until - now) / 60))
+            reason = self.config.get("snooze_reason", "Snoozed")
+            return True, f"{reason} active ({remaining_mins}m remaining)"
+
+        if self.is_in_quiet_hours(now_time=now_time):
+            start = self.config.get("quiet_hours_start", "23:00")
+            end = self.config.get("quiet_hours_end", "07:30")
+            return True, f"Night Quiet Hours ({start} - {end})"
+
+        return False, ""
+
+    def snooze(self, minutes: float, reason: str = "Snooze"):
+        """Snoozes phone alerts for specified minutes."""
+        self.config["snooze_until"] = time.time() + (minutes * 60)
+        self.config["snooze_reason"] = reason
+        self.save_config()
+
+    def sleep_mode(self, hours: float = 8.0):
+        """Activates Sleep Mode (mutes alerts for specified hours, default 8h)."""
+        self.snooze(hours * 60, reason="🌙 Sleep Mode")
+
+    def class_mode(self, minutes: float = 60.0):
+        """Activates Class / Lecture Mode (mutes alerts for specified minutes, default 60m)."""
+        self.snooze(minutes, reason="🎓 Class Mode")
+
+    def resume(self):
+        """Cancels all active snooze, sleep, or class modes."""
+        self.config["snooze_until"] = 0.0
+        self.config["snooze_reason"] = ""
+        self.save_config()
+
+    def set_quiet_hours(self, start: str, end: str, enabled: bool = True):
+        """Configures automated daily quiet hours."""
+        self.config["quiet_hours_start"] = start
+        self.config["quiet_hours_end"] = end
+        self.config["quiet_hours_enabled"] = enabled
+        self.save_config()
+
     def send_phone_alert(
         self,
         title: str,
@@ -85,8 +156,9 @@ class PhoneAlertManager:
         """
         Dispatches mobile buzz and notification asynchronously in a background thread.
         """
-        if not self.config.get("enabled", True):
-            logger.info("Phone alerts are disabled in config.")
+        muted, reason = self.is_muted()
+        if muted and not bypass_cooldown:
+            logger.info(f"Skipping phone alert: {reason}")
             return False
 
         now = time.time()

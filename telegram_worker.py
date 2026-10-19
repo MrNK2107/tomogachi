@@ -100,8 +100,11 @@ class TelegramBotWorker(QThread):
         self.app.add_handler(CommandHandler("topic", self._cmd_topic))
         self.app.add_handler(CommandHandler("stats", self._cmd_stats))
         self.app.add_handler(CommandHandler("roast", self._cmd_roast))
+        self.app.add_handler(CommandHandler("sleep", self._cmd_sleep))
+        self.app.add_handler(CommandHandler("class", self._cmd_class))
         self.app.add_handler(CommandHandler("snooze", self._cmd_snooze))
         self.app.add_handler(CommandHandler("resume", self._cmd_resume))
+        self.app.add_handler(CommandHandler("wake", self._cmd_resume))
 
         # Callbacks & Polls
         self.app.add_handler(CallbackQueryHandler(self._handle_callback))
@@ -346,6 +349,22 @@ class TelegramBotWorker(QThread):
                 )
                 await update.message.reply_text("📳 *Dispatched test buzz to your phone!* Check your ntfy app.", parse_mode="Markdown")
                 return
+            elif sub in ("off", "disable", "mute"):
+                phone_alert_manager.set_enabled(False)
+                await update.message.reply_text("🔕 *Phone alerts turned OFF.* Sentinel will not buzz your phone.", parse_mode="Markdown")
+                return
+            elif sub in ("on", "enable", "unmute"):
+                phone_alert_manager.set_enabled(True)
+                phone_alert_manager.resume()
+                self.snooze_until = None
+                await update.message.reply_text("🔔 *Phone alerts turned ON & Resumed.* Monitoring is active.", parse_mode="Markdown")
+                return
+            elif sub in ("sleep", "night"):
+                await self._cmd_sleep(update, context)
+                return
+            elif sub in ("class", "lecture"):
+                await self._cmd_class(update, context)
+                return
             elif sub == "topic" and len(context.args) > 1:
                 topic = context.args[1]
                 phone_alert_manager.set_topic(topic)
@@ -360,31 +379,38 @@ class TelegramBotWorker(QThread):
         topic = phone_alert_manager.config.get("ntfy_topic", "awaken_phantom_832313259")
         ntfy_url = phone_alert_manager.get_ntfy_url()
         webhook_status = "Configured" if phone_alert_manager.config.get("webhook_url") else "Not configured"
+        muted, mute_reason = phone_alert_manager.is_muted()
+        status_badge = f"⏸ *MUTED:* `{mute_reason}`" if muted else "🟢 *ACTIVE (Guarding)*"
+        q_start = phone_alert_manager.config.get("quiet_hours_start", "23:00")
+        q_end = phone_alert_manager.config.get("quiet_hours_end", "07:30")
 
         keyboard = [
             [
-                InlineKeyboardButton("⚡ Buzz My Phone Now", callback_data="btn_phone_test"),
-                InlineKeyboardButton("🚨 Mobile Alarm Web", url="https://awaken-sentinel.onrender.com/mobile-alarm"),
+                InlineKeyboardButton("🌙 Sleep Mode (8h)", callback_data="btn_sleep_mode"),
+                InlineKeyboardButton("🎓 Class Mode (1h)", callback_data="btn_class_mode"),
             ],
             [
-                InlineKeyboardButton("📲 Open ntfy Topic", url=ntfy_url),
+                InlineKeyboardButton("▶️ Resume All Alerts", callback_data="btn_resume_alerts"),
+                InlineKeyboardButton("⚡ Buzz Test", callback_data="btn_phone_test"),
+            ],
+            [
+                InlineKeyboardButton("🚨 Mobile Alarm Web", url="https://awaken-sentinel.onrender.com/mobile-alarm"),
+                InlineKeyboardButton("📲 Open ntfy", url=ntfy_url),
             ]
         ]
         text = (
-            "📱 *MOBILE PHONE NUISANCE & ALERTS* 📳\n\n"
-            "When you're away from your laptop, Awaken Sentinel vibrates and alerts your phone!\n\n"
+            "📱 *MOBILE PHONE CONTROL & ALERTS* 📳\n\n"
+            f"• *Status:* {status_badge}\n"
+            f"• *Night Quiet Hours:* `{q_start}` - `{q_end}` (Auto-sleep)\n"
             f"• *ntfy Topic:* `{topic}`\n"
-            f"• *ntfy Link:* [{ntfy_url}]({ntfy_url})\n"
-            f"• *Custom Webhook (MacroDroid):* `{webhook_status}`\n\n"
-            "🛠 *How to set up in 30 seconds:*\n"
-            "1. Install the free **ntfy** app (Android / iOS / Web PWA).\n"
-            "2. Tap **+** and subscribe to: `" + topic + "`\n"
-            "3. Whenever you are away, your phone will vibrate with high priority!\n\n"
-            "💡 *Optional (Android):* Install **MacroDroid** to trigger screen-on, flashlight, or continuous vibration via `/phone webhook <url>`.\n\n"
-            "Commands:\n"
-            "• `/phone test` - Test phone vibration immediately\n"
-            "• `/phone topic <name>` - Change topic name\n"
-            "• `/phone webhook <url>` - Set MacroDroid webhook URL"
+            f"• *MacroDroid Webhook:* `{webhook_status}`\n\n"
+            "🎛 *Quick Commands:*\n"
+            "• `/sleep [hours]` - Mute for sleep (default 8h)\n"
+            "• `/class [mins]` - Mute for class / lecture (default 60m)\n"
+            "• `/snooze <mins>` - Pause alerts (e.g. `/snooze 30`)\n"
+            "• `/resume` - Unmute and re-activate alerts\n"
+            "• `/phone off` / `/phone on` - Toggle phone alerts\n"
+            "• `/phone test` - Test phone vibration"
         )
         await update.message.reply_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard), disable_web_page_preview=True)
 
@@ -609,19 +635,91 @@ class TelegramBotWorker(QThread):
             roast = get_brutal_roast(idle_m)
         await update.message.reply_text(roast, parse_mode="Markdown")
 
+    async def _cmd_sleep(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        from core.phone_alert import phone_alert_manager
+        hours = 8.0
+        if context.args:
+            try:
+                raw = context.args[0].lower().replace("h", "")
+                hours = float(raw)
+            except ValueError:
+                pass
+        phone_alert_manager.sleep_mode(hours)
+        self.snooze_until = datetime.datetime.now() + datetime.timedelta(hours=hours)
+        keyboard = [[InlineKeyboardButton("▶️ Wake Up / Resume Alerts", callback_data="btn_resume_alerts")]]
+        target = update.message if hasattr(update, 'message') and update.message else getattr(update, 'callback_query', update)
+        if hasattr(target, 'message') and target.message:
+            target = target.message
+        await target.reply_text(
+            f"🌙 *Sleep Mode Activated ({hours:.0f} hours)* 😴\n\n"
+            "• Mobile phone vibrations & webhooks are completely muted.\n"
+            "• Desktop sentinel notifications are paused.\n"
+            "• Safe until morning! Tap below or send /resume when you wake up.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+    async def _cmd_class(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        from core.phone_alert import phone_alert_manager
+        mins = 60.0
+        if context.args:
+            try:
+                raw = context.args[0].lower()
+                if raw.endswith("h"):
+                    mins = float(raw[:-1]) * 60.0
+                elif raw.endswith("m"):
+                    mins = float(raw[:-1])
+                else:
+                    mins = float(raw)
+            except ValueError:
+                pass
+        phone_alert_manager.class_mode(mins)
+        self.snooze_until = datetime.datetime.now() + datetime.timedelta(minutes=mins)
+        keyboard = [[InlineKeyboardButton("▶️ Class Over / Resume Alerts", callback_data="btn_resume_alerts")]]
+        target = update.message if hasattr(update, 'message') and update.message else getattr(update, 'callback_query', update)
+        if hasattr(target, 'message') and target.message:
+            target = target.message
+        await target.reply_text(
+            f"🎓 *Class Mode Activated ({mins:.0f} mins)* 📚\n\n"
+            "• Mobile phone alerts & MacroDroid triggers are silenced.\n"
+            "• PC alerts are silent to prevent any disruption in lecture.\n"
+            "• Tap below or send /resume when your class is over.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
     async def _cmd_snooze(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        from core.phone_alert import phone_alert_manager
         minutes = 30.0
         if context.args:
             try:
-                minutes = float(context.args[0])
+                raw = context.args[0].lower()
+                if raw.endswith("h"):
+                    minutes = float(raw[:-1]) * 60.0
+                elif raw.endswith("m"):
+                    minutes = float(raw[:-1])
+                else:
+                    minutes = float(raw)
             except ValueError:
                 pass
         self.snooze_until = datetime.datetime.now() + datetime.timedelta(minutes=minutes)
-        await update.message.reply_text(f"⏸️ Alerts snoozed for *{minutes:.0f} minutes*.", parse_mode="Markdown")
+        phone_alert_manager.snooze(minutes, reason="Snoozed")
+        keyboard = [[InlineKeyboardButton("▶️ Resume Alerts", callback_data="btn_resume_alerts")]]
+        await update.message.reply_text(
+            f"⏸️ *Alerts snoozed for {minutes:.0f} minutes*.\n"
+            "Both PC notifications and phone alerts are muted.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
 
     async def _cmd_resume(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        from core.phone_alert import phone_alert_manager
         self.snooze_until = None
-        await update.message.reply_text("▶️ Alerts resumed! Your pet is actively monitoring you.", parse_mode="Markdown")
+        phone_alert_manager.resume()
+        target = update.message if hasattr(update, 'message') and update.message else getattr(update, 'callback_query', update)
+        if hasattr(target, 'message') and target.message:
+            target = target.message
+        await target.reply_text("⚡ *Alerts Resumed!* All quiet modes cleared. Monitoring is active.", parse_mode="Markdown")
 
     # -------------------------------------------------------------------------
     # Callback Query & Poll Answer Handlers
@@ -658,6 +756,12 @@ class TelegramBotWorker(QThread):
                 bypass_cooldown=True
             )
             await query.message.reply_text("📳 *Dispatched test buzz to your phone!*", parse_mode="Markdown")
+        elif data == "btn_sleep_mode":
+            await self._cmd_sleep(query, context)
+        elif data == "btn_class_mode":
+            await self._cmd_class(query, context)
+        elif data == "btn_resume_alerts":
+            await self._cmd_resume(query, context)
         elif data == "btn_feed":
             self.pet_action.emit("feed")
             await query.message.reply_text("🥩 *Fed your pet!* (+10 Mood)", parse_mode="Markdown")
@@ -806,8 +910,28 @@ class TelegramBotWorker(QThread):
             return
 
         # 6.5 Mobile Phone Nuisance & Alerts
-        if any(w in lower for w in ["test phone", "buzz phone", "buzz my phone", "mess with my phone", "phone alert", "vibrate phone", "phone"]):
+        if any(w in lower for w in ["test phone", "buzz phone", "buzz my phone", "mess with my phone", "phone alert", "vibrate phone"]):
             await self._cmd_phone(update, context)
+            return
+
+        # 6.6 Sleep Mode (Mute for sleeping)
+        if any(w in lower for w in ["going to sleep", "sleep mode", "goodnight", "good night", "bedtime", "sleep for", "i am sleeping", "im sleeping", "sleeping"]):
+            await self._cmd_sleep(update, context)
+            return
+
+        # 6.7 Class Mode (Mute for lectures / class)
+        if any(w in lower for w in ["in class", "class mode", "lecture", "in lecture", "class for", "studying in class", "i am in class", "im in class"]):
+            await self._cmd_class(update, context)
+            return
+
+        # 6.8 Resume / Wake Up
+        if any(w in lower for w in ["wake up", "class over", "back from class", "i'm awake", "im awake", "i am awake", "resume alerts", "resume", "unmute"]):
+            await self._cmd_resume(update, context)
+            return
+
+        # 6.9 Snooze
+        if any(w in lower for w in ["snooze", "pause alerts", "pause alert", "don't disturb", "dont disturb"]):
+            await self._cmd_snooze(update, context)
             return
 
         # 7. Browser Launchers
