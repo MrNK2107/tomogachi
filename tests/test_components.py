@@ -471,23 +471,28 @@ class TestAwakenIntegration(unittest.TestCase):
         self.assertTrue(act_resp.json().get("ok"))
 
     def test_phone_alert_manager(self):
+        import tempfile
+        import os
         from core.phone_alert import PhoneAlertManager
-        mgr = PhoneAlertManager()
-        self.assertTrue(mgr.config["enabled"])
-        self.assertIn("ntfy.sh", mgr.get_ntfy_url())
-        
-        # Test topic and webhook setters
-        mgr.set_topic("test_topic_123")
-        self.assertIn("test_topic_123", mgr.get_ntfy_url())
-        mgr.set_webhook("https://trigger.macrodroid.com/test")
-        self.assertEqual(mgr.config["webhook_url"], "https://trigger.macrodroid.com/test")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            temp_cfg = os.path.join(tmpdir, "phone_config.json")
+            with patch("core.phone_alert.CONFIG_PATH", temp_cfg):
+                mgr = PhoneAlertManager()
+                self.assertTrue(mgr.config["enabled"])
+                self.assertIn("ntfy.sh", mgr.get_ntfy_url())
+                
+                # Test topic and webhook setters
+                mgr.set_topic("test_topic_123")
+                self.assertIn("test_topic_123", mgr.get_ntfy_url())
+                mgr.set_webhook("https://trigger.macrodroid.com/test")
+                self.assertEqual(mgr.config["webhook_url"], "https://trigger.macrodroid.com/test")
 
-        # Test away alerts (mocking requests.post)
-        with patch("requests.post") as mock_post:
-            mock_post.return_value.status_code = 200
-            res1 = mgr.trigger_away_phone_nuisance(20.0, "Claude Code")
-            self.assertTrue(res1)
-            self.assertTrue(mock_post.called)
+                # Test away alerts (mocking requests.post)
+                with patch("requests.post") as mock_post:
+                    mock_post.return_value.status_code = 200
+                    res1 = mgr.trigger_away_phone_nuisance(20.0, "Claude Code")
+                    self.assertTrue(res1)
+                    self.assertTrue(mock_post.called)
 
     def test_voice_alert_silent_constraint(self):
         from core.voice_alert import VoiceAlert

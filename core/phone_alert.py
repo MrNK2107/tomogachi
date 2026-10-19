@@ -14,7 +14,7 @@ DEFAULT_PHONE_CONFIG = {
     "enabled": True,
     "ntfy_topic": "awaken_phantom_832313259",
     "ntfy_server": "https://ntfy.sh",
-    "webhook_url": "",  # Optional MacroDroid / Tasker / Shortcuts webhook
+    "webhook_url": os.getenv("MACRODROID_WEBHOOK_URL", "https://trigger.macrodroid.com/a61b3516-109b-4e8d-95ea-cc1e6d428d07/id1"),
     "vibrate_pattern": "1000,300,1000,300,1000,500,2000",
     "last_alert_time": 0.0,
     "cooldown_seconds": 300.0,  # 5 minutes minimum between buzzes to avoid spam
@@ -143,6 +143,8 @@ class PhoneAlertManager:
                         "timestamp": now,
                     }
                     w_resp = requests.post(webhook_url, json=payload, timeout=8)
+                    if w_resp.status_code != 200:
+                        w_resp = requests.get(webhook_url, timeout=8)
                     logger.info(f"Triggered custom mobile webhook ({webhook_url}) with status {w_resp.status_code}")
                 except Exception as e:
                     logger.error(f"Failed to trigger custom mobile webhook: {e}")
