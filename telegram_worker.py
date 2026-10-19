@@ -113,6 +113,16 @@ class TelegramBotWorker(QThread):
         # Natural language processor for free-form conversation & commands
         self.app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_natural_language))
 
+        # Graceful conflict handler when cloud instance is active
+        async def _on_telegram_error(update: object, context: ContextTypes.DEFAULT_TYPE):
+            import telegram.error
+            if isinstance(context.error, telegram.error.Conflict):
+                logger.debug("Telegram polling conflict: cloud instance is primary polling source.")
+                return
+            logger.error(f"Telegram error: {context.error}")
+
+        self.app.add_error_handler(_on_telegram_error)
+
         try:
             await self.app.initialize()
             await self.app.start()
