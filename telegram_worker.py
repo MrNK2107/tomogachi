@@ -1,14 +1,14 @@
 import asyncio
+import datetime
 import logging
-import threading
+import random
+import re
 from typing import Optional, Dict, Any
-from PyQt6.QtCore import QThread, pyqtSignal, QObject
+from PyQt6.QtCore import QThread, pyqtSignal
 
 import config
 from quiz.quiz_manager import QuizManager
 from quiz.roast_bank import get_brutal_roast
-from core.idle_detector import IdleDetector
-from core.agent_detector import AgentDetector
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Poll
 from telegram.ext import (
     Application,
@@ -20,14 +20,16 @@ from telegram.ext import (
 
 logger = logging.getLogger("TelegramWorker")
 
+
 class TelegramBotWorker(QThread):
     """
     QThread worker running python-telegram-bot polling alongside PyQt6.
     Enables bidirectional interaction between desktop pet and mobile Telegram.
     """
+
     # Signals to PyQt6 main thread
     quiz_solved = pyqtSignal(bool, str)  # (is_correct, explanation) -> heals pet
-    pet_action = pyqtSignal(str)         # ("feed", "pet", "poke")
+    pet_action = pyqtSignal(str)         # ("feed", "pet", "poke", "alarm", "focus:25", "sound:on|off")
 
     def __init__(self, quiz_manager: QuizManager, parent=None):
         super().__init__(parent)
@@ -37,7 +39,7 @@ class TelegramBotWorker(QThread):
         self.running = True
         self.loop = None
         self.snooze_until = None
-        self.pet_state_getter = None  # Callable returning dict of pet state
+        self.pet_state_getter = None  # Callable returning live telemetry dict
 
     def set_pet_state_getter(self, getter_fn):
         """Sets a callback function to get live pet metrics from Qt main thread."""
@@ -67,6 +69,15 @@ class TelegramBotWorker(QThread):
         self.app.add_handler(CommandHandler("help", self._cmd_help))
         self.app.add_handler(CommandHandler("pet", self._cmd_pet))
         self.app.add_handler(CommandHandler("status", self._cmd_pet))
+        self.app.add_handler(CommandHandler("snap", self._cmd_snap))
+        self.app.add_handler(CommandHandler("screen", self._cmd_snap))
+        self.app.add_handler(CommandHandler("alarm", self._cmd_alarm))
+        self.app.add_handler(CommandHandler("ping", self._cmd_alarm))
+        self.app.add_handler(CommandHandler("focus", self._cmd_focus))
+        self.app.add_handler(CommandHandler("feed", self._cmd_feed))
+        self.app.add_handler(CommandHandler("poke", self._cmd_poke))
+        self.app.add_handler(CommandHandler("sound", self._cmd_sound))
+        self.app.add_handler(CommandHandler("boss", self._cmd_boss))
         self.app.add_handler(CommandHandler("quiz", self._cmd_quiz))
         self.app.add_handler(CommandHandler("leetcode", self._cmd_leetcode))
         self.app.add_handler(CommandHandler("topic", self._cmd_topic))
@@ -98,8 +109,124 @@ class TelegramBotWorker(QThread):
     def is_snoozed(self) -> bool:
         if not self.snooze_until:
             return False
-        import datetime
         return datetime.datetime.now() < self.snooze_until
+
+    # -------------------------------------------------------------------------
+    # Thread-Safe Proactive Notification Dispatchers (Called from Qt main thread)
+    # -------------------------------------------------------------------------
+
+    def dispatch_notification(self, text: str, reply_markup=None):
+        """Thread-safely send proactive notification to user's Telegram."""
+        if not self.loop or not self.app or not self.chat_id or self.is_snoozed():
+            return
+        try:
+            asyncio.run_coroutine_threadsafe(
+                self.app.bot.send_message(
+                    chat_id=self.chat_id,
+                    text=text,
+                    parse_mode="Markdown",
+                    reply_markup=reply_markup,
+                ),
+                self.loop,
+            )
+        except Exception as e:
+            logger.warning(f"Failed to dispatch notification: {e}")
+
+    def dispatch_quiz(self, category: Optional[str] = None):
+        """Thread-safely send interactive placement quiz poll."""
+        if not self.loop or not self.app or not self.chat_id or self.is_snoozed():
+            return
+        try:
+            asyncio.run_coroutine_threadsafe(
+                self.send_quiz(chat_id=self.chat_id, category=category),
+                self.loop,
+            )
+        except Exception as e:
+            logger.warning(f"Failed to dispatch quiz: {e}")
+
+    def dispatch_doomscroll_alert(self, window_title: str, dwell_sec: float):
+        """Dispatches an urgent alert when user is lingering on distracting apps."""
+        dwell_min = dwell_sec / 60.0
+        disp_win = window_title if len(window_title) <= 36 else window_title[:33] + "..."
+        text = (
+            "🚨 *DOOMSCROLL RED ALERT!* 📱\n\n"
+            f"You've been distracted on *'{disp_win}'* for *{dwell_min:.1f} minutes*!\n\n"
+            "Your placement competition is grinding LeetCode right now while you're wasting prime hours.\n\n"
+            "⚠️ *Close the distraction or prove yourself with this question right now:*"
+        )
+        keyboard = [
+            [
+                InlineKeyboardButton("🔥 Solve Quiz (Snap Back)", callback_data="btn_quiz"),
+                InlineKeyboardButton("🚨 Desk Alarm", callback_data="btn_alarm"),
+            ],
+            [
+                InlineKeyboardButton("🏃 Heading Back To Code", callback_data="heading_back"),
+            ],
+        ]
+        self.dispatch_notification(text, InlineKeyboardMarkup(keyboard))
+        self.dispatch_quiz()
+
+    def dispatch_battery_alert(self, percent: int):
+        """Dispatches low battery warning."""
+        text = (
+            f"🔋 *LOW BATTERY WARNING ({percent}%)!* ⚡\n\n"
+            "Your laptop is running on battery and is about to sleep!\n"
+            "Plug in your power adapter immediately before your unsaved files are lost!"
+        )
+        self.dispatch_notification(text)
+
+    def dispatch_agent_finished_alert(self, agent_name: str):
+        """Dispatches notification when AI agents finish long tasks."""
+        text = (
+            "⚡ *AI Agent Task Completed!* 🤖\n\n"
+            f"Active background task (`{agent_name}`) has finished.\n"
+            "Return to your IDE and review the generated diffs!"
+        )
+        keyboard = [
+            [
+                InlineKeyboardButton("📸 View Desktop Snap", callback_data="btn_snap"),
+                InlineKeyboardButton("🧠 Quick Quiz", callback_data="btn_quiz"),
+            ]
+        ]
+        self.dispatch_notification(text, InlineKeyboardMarkup(keyboard))
+
+    def dispatch_break_reminder(self, session_minutes: float):
+        """Dispatches ergonomic / hydration reminder."""
+        text = (
+            f"💧 *HYDRATE & RECHARGE BREAK ({session_minutes:.0f} MINS)* 🧘‍♂️\n\n"
+            "You've been locked in deep coding for an hour straight without a break.\n"
+            "• Stand up and stretch your back\n"
+            "• Drink a glass of water\n"
+            "• Rest your eyes for 60 seconds\n\n"
+            "Keep the momentum going, champion! 🔥"
+        )
+        self.dispatch_notification(text)
+
+    def dispatch_away_alert(self, idle_minutes: float, agents_summary: str):
+        """Dispatches desk inactivity alert."""
+        roast = get_brutal_roast(idle_minutes)
+        text = (
+            f"⚠️ *DESK INACTIVITY ({idle_minutes:.0f} MINS IDLE)* 💻\n\n"
+            f"• *Background Agents:* `{agents_summary}`\n\n"
+            f"{roast}\n\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
+            "🧠 *Solve this question to feed your desktop pet:*"
+        )
+        keyboard = [
+            [
+                InlineKeyboardButton("🥩 Feed with Quiz", callback_data="btn_quiz"),
+                InlineKeyboardButton("🚨 Desk Alarm", callback_data="btn_alarm"),
+            ],
+            [
+                InlineKeyboardButton("🏃 Heading Back", callback_data="heading_back"),
+            ]
+        ]
+        self.dispatch_notification(text, InlineKeyboardMarkup(keyboard))
+        self.dispatch_quiz()
+
+    # -------------------------------------------------------------------------
+    # Command Handlers
+    # -------------------------------------------------------------------------
 
     async def _cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         chat_id = str(update.effective_chat.id)
@@ -112,7 +239,6 @@ class TelegramBotWorker(QThread):
             if env_file.exists():
                 text = env_file.read_text(encoding="utf-8")
                 if "TELEGRAM_CHAT_ID=" in text:
-                    import re
                     text = re.sub(r"TELEGRAM_CHAT_ID=.*", f"TELEGRAM_CHAT_ID={chat_id}", text)
                 else:
                     text += f"\nTELEGRAM_CHAT_ID={chat_id}\n"
@@ -122,24 +248,33 @@ class TelegramBotWorker(QThread):
 
         keyboard = [
             [
-                InlineKeyboardButton("🐾 Pet Status", callback_data="btn_pet_status"),
+                InlineKeyboardButton("📸 Desktop Snap", callback_data="btn_snap"),
                 InlineKeyboardButton("🧠 Quick Quiz", callback_data="btn_quiz"),
+            ],
+            [
+                InlineKeyboardButton("🚨 Desk Alarm", callback_data="btn_alarm"),
+                InlineKeyboardButton("🥩 Feed Pet", callback_data="btn_feed"),
             ],
             [
                 InlineKeyboardButton("💻 Daily LeetCode", callback_data="btn_leetcode"),
                 InlineKeyboardButton("🔥 Roast Me", callback_data="btn_roast"),
-            ]
+            ],
         ]
         text = (
             "🐾 *Tomogachi Awaken Companion is Online!*\n\n"
             f"✅ Linked to Chat ID: `{chat_id}`\n\n"
-            "I am your live desktop focus pet and placement sentinel.\n\n"
+            "Your autonomous desktop companion & placement accountability sentinel.\n\n"
             "*Available Commands:*\n"
-            "• `/pet` — Check live desktop pet mood, level & running agents\n"
+            "• `/snap` — Live desktop snapshot (window, CPU, battery, Git, pet mood)\n"
+            "• `/alarm` — Remotely trigger sound, voice & pet alarm on your laptop\n"
+            "• `/focus <mins>` — Start a Pomodoro deep work sprint (e.g. `/focus 25`)\n"
+            "• `/feed` / `/poke` — Interact directly with your desktop pet\n"
+            "• `/boss` — Sudden Death Boss Fight: 3 rapid-fire placement questions\n"
             "• `/quiz` — Solve placement MCQs to *heal and feed your pet*\n"
             "• `/leetcode` — Daily curated placement coding challenge\n"
-            "• `/roast` — Merciless reality check on demand\n"
+            "• `/roast` — Contextual reality check based on active window\n"
             "• `/stats` — Accuracy, answer streaks, focus stats\n"
+            "• `/sound <on|off>` — Toggle laptop voice alerts\n"
             "• `/snooze <mins>` — Pause alerts (e.g. `/snooze 30`)"
         )
         await update.message.reply_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
@@ -152,10 +287,101 @@ class TelegramBotWorker(QThread):
         keyboard = [
             [
                 InlineKeyboardButton("🥩 Feed with Quiz", callback_data="btn_quiz"),
-                InlineKeyboardButton("🔄 Refresh Status", callback_data="btn_pet_status"),
+                InlineKeyboardButton("📸 Full Snap", callback_data="btn_snap"),
+            ],
+            [
+                InlineKeyboardButton("🚨 Desk Alarm", callback_data="btn_alarm"),
+                InlineKeyboardButton("🔄 Refresh", callback_data="btn_pet_status"),
             ]
         ]
         await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
+
+    async def _cmd_snap(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        state = self.pet_state_getter() if self.pet_state_getter else {}
+        win = state.get("active_window", "Desktop")
+        win_class = state.get("active_window_class", "NEUTRAL")
+        cpu = state.get("cpu_percent", 0.0)
+        ram = state.get("ram_percent", 0.0)
+        bat = state.get("battery_percent", 100)
+        plugged = state.get("is_plugged", True)
+        git_summary = state.get("git_summary", "Git: Not detected")
+        mood = state.get("mood", 85.0)
+        level = state.get("level", 0)
+        agents = state.get("agents_summary", "None")
+        streak = state.get("streak", "Active")
+
+        class_emoji = "🟢 PRODUCTIVE" if win_class == "PRODUCTIVE" else ("🔴 DISTRACTING" if win_class == "DISTRACTING" else "⚪ NEUTRAL")
+        pwr_str = f"⚡ {bat}% (Charging)" if plugged else f"🔋 {bat}% (Battery)"
+        level_desc = ["🟢 Level 0: Pure Focus", "🟡 Level 1: Minor Drift", "🟠 Level 2: Distracted", "🔴 Level 3: Maximum Blitz"][min(level, 3)]
+
+        disp_win = win if len(win) <= 40 else win[:37] + "..."
+
+        msg = (
+            "📸 *Desktop Live Snapshot:*\n\n"
+            f"🪟 *Foreground Window:*\n`{disp_win}`\n"
+            f"📊 *Context:* {class_emoji}\n\n"
+            f"💻 *Hardware:* CPU: `{cpu:.0f}%` | RAM: `{ram:.0f}%` | {pwr_str}\n"
+            f"🌿 *Git:* `{git_summary}`\n"
+            f"🤖 *Active Agents:* `{agents}`\n\n"
+            f"🐾 *Pet Status:* Mood: `{mood:.0f}%` | {level_desc}\n"
+            f"🔥 *Focus Streak:* {streak}"
+        )
+        keyboard = [
+            [
+                InlineKeyboardButton("🔄 Refresh Snap", callback_data="btn_snap"),
+                InlineKeyboardButton("🚨 Desk Alarm", callback_data="btn_alarm"),
+            ],
+            [
+                InlineKeyboardButton("🥩 Feed Pet", callback_data="btn_feed"),
+                InlineKeyboardButton("🧠 Quick Quiz", callback_data="btn_quiz"),
+            ]
+        ]
+        await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
+
+    async def _cmd_alarm(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        self.pet_action.emit("alarm")
+        await update.message.reply_text(
+            "🚨 *DESK ALARM TRIGGERED!* 🔊\n\n"
+            "Your desktop pet is jumping, knocking on screen, and sounding voice alerts on your laptop!",
+            parse_mode="Markdown"
+        )
+
+    async def _cmd_focus(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        mins = 25
+        if context.args:
+            try:
+                mins = int(context.args[0])
+            except ValueError:
+                pass
+        self.pet_action.emit(f"focus:{mins}")
+        await update.message.reply_text(
+            f"🎯 *Focus Sprint Started ({mins} mins)!* ⏱️\n\n"
+            "Your desktop pet is now in Deep Work mode.\n"
+            "Eyes on the IDE — don't open any distracting tabs!",
+            parse_mode="Markdown"
+        )
+
+    async def _cmd_feed(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        self.pet_action.emit("feed")
+        await update.message.reply_text("🥩 *You fed your desktop pet!* (+10 Mood points, Pet is delighted! ✨)", parse_mode="Markdown")
+
+    async def _cmd_poke(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        self.pet_action.emit("poke")
+        await update.message.reply_text("👉 *Poked your pet!* It jumped on your desk and looked at you suspiciously! 👀", parse_mode="Markdown")
+
+    async def _cmd_sound(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        mode = context.args[0].lower() if context.args else "toggle"
+        self.pet_action.emit(f"sound:{mode}")
+        await update.message.reply_text(f"🔊 Laptop sound & voice attention set to: *{mode.upper()}*", parse_mode="Markdown")
+
+    async def _cmd_boss(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await update.message.reply_text(
+            "⚔️ *SUDDEN DEATH BOSS FIGHT!* 🐲\n\n"
+            "Rapid-Fire Placement MCQs are incoming!\n"
+            "Solve them without mistakes to supercharge your pet and clear distraction points! 🔥",
+            parse_mode="Markdown"
+        )
+        await self.send_quiz(chat_id=str(update.effective_chat.id))
 
     async def _cmd_quiz(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         category = context.args[0] if context.args else None
@@ -183,14 +409,30 @@ class TelegramBotWorker(QThread):
 
     async def _cmd_stats(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         summary = self.quiz_manager.get_stats_summary()
-        await update.message.reply_text(summary, parse_mode="Markdown")
+        state = self.pet_state_getter() if self.pet_state_getter else {}
+        git_info = state.get("git_summary", "")
+        text = f"{summary}\n\n🌿 *Current Repository:* `{git_info}`"
+        await update.message.reply_text(text, parse_mode="Markdown")
 
     async def _cmd_roast(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        roast = get_brutal_roast(35.0)
+        state = self.pet_state_getter() if self.pet_state_getter else {}
+        win = state.get("active_window", "")
+        win_class = state.get("active_window_class", "NEUTRAL")
+        idle_m = state.get("idle_minutes", 15.0)
+
+        if win_class == "DISTRACTING" and win:
+            disp_win = win if len(win) <= 30 else win[:27] + "..."
+            roast = (
+                f"🚨 *CAUGHT RED-HANDED!* 📸\n\n"
+                f"You're literally staring at *'{disp_win}'* right now while dreaming about landing a high-paying tech offer.\n\n"
+                "Your competition is mastering Dynamic Programming and System Design, while you're dedicating your prime cognitive hours to mindless entertainment.\n\n"
+                "Close that tab right now before you regret it in the interview room! 💀"
+            )
+        else:
+            roast = get_brutal_roast(idle_m)
         await update.message.reply_text(roast, parse_mode="Markdown")
 
     async def _cmd_snooze(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        import datetime
         minutes = 30.0
         if context.args:
             try:
@@ -204,6 +446,10 @@ class TelegramBotWorker(QThread):
         self.snooze_until = None
         await update.message.reply_text("▶️ Alerts resumed! Your pet is actively monitoring you.", parse_mode="Markdown")
 
+    # -------------------------------------------------------------------------
+    # Callback Query & Poll Answer Handlers
+    # -------------------------------------------------------------------------
+
     async def _handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
         await query.answer()
@@ -212,6 +458,14 @@ class TelegramBotWorker(QThread):
 
         if data == "btn_pet_status":
             await query.message.reply_text(self._build_pet_status_text(), parse_mode="Markdown")
+        elif data == "btn_snap":
+            await self._cmd_snap(query, context)
+        elif data == "btn_alarm":
+            self.pet_action.emit("alarm")
+            await query.message.reply_text("🚨 *Desk Alarm Triggered!*", parse_mode="Markdown")
+        elif data == "btn_feed":
+            self.pet_action.emit("feed")
+            await query.message.reply_text("🥩 *Fed your pet!* (+10 Mood)", parse_mode="Markdown")
         elif data == "btn_quiz":
             await self.send_quiz(chat_id=chat_id)
         elif data == "btn_leetcode":
@@ -224,7 +478,7 @@ class TelegramBotWorker(QThread):
             )
             await query.message.reply_text(text, parse_mode="Markdown")
         elif data == "btn_roast":
-            await query.message.reply_text(get_brutal_roast(30.0), parse_mode="Markdown")
+            await self._cmd_roast(query, context)
         elif data == "heading_back":
             await query.message.reply_text("🏃 Awesome! Head back to the desk and let's get into the flow zone 💻🔥", parse_mode="Markdown")
 
@@ -245,7 +499,6 @@ class TelegramBotWorker(QThread):
                 f"🎉 *Correct!* Current streak: 🔥 *{result['current_streak']} in a row!*\n\n"
                 "🥩 *Your desktop pet was fed!* (+15 Mood points, Focus restored! ✨)"
             )
-            # Emit signal to heal pet in PyQt6 GUI!
             self.quiz_solved.emit(True, result["explanation"])
         else:
             msg = (

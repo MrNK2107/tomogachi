@@ -161,6 +161,45 @@ class PetWindow(QWidget):
             self.screen_overlay.add_ripple(pet_center, color=QColor("#ff6b81"), max_radius=40)
         self.update()
 
+    def show_custom_bubble(self, text: str, duration_ticks: int = 120):
+        """Display an immediate custom speech bubble."""
+        self.bubble_text = text
+        self.force_bubble = True
+        self.bubble_timer = 0
+        self.bubble_max_duration = duration_ticks
+        self.update()
+
+    def trigger_alarm_animation(self):
+        """Trigger an aggressive attention-grabbing alert animation."""
+        self.is_knocking = True
+        self.knock_phase = 0.0
+        self.show_custom_bubble("🚨 WAKE UP! ALARM! 🚨", 150)
+        if hasattr(self, 'procedural_pet') and self.procedural_pet:
+            self.procedural_pet.set_state(3)
+        if self.screen_overlay:
+            pet_center = self.mapToGlobal(QPoint(90, 90))
+            self.screen_overlay.add_ripple(pet_center, color=QColor("#ff0844"), max_radius=120)
+        self.move(self.x(), max(0, self.y() - 25))
+        self.update()
+
+    def trigger_feed_animation(self):
+        """Trigger fed animation with sparkles & food bubble."""
+        self.pet_was_petted = True
+        self.pet_reaction_timer = 60
+        self.show_custom_bubble("🥩 Yum! Focus boosted! ✨", 120)
+        if hasattr(self, 'procedural_pet') and self.procedural_pet:
+            self.procedural_pet.trigger_happy()
+        if self.screen_overlay:
+            pet_center = self.mapToGlobal(QPoint(90, 90))
+            self.screen_overlay.add_ripple(pet_center, color=QColor("#00f5d4"), max_radius=60)
+        self.update()
+
+    def trigger_poke_animation(self):
+        """Trigger poke reaction."""
+        self.show_custom_bubble("Ouch! Go code! 😾", 100)
+        self.move(self.x() + random.choice([-20, 20]), max(0, self.y() - 15))
+        self.update()
+
     def set_mood(self, mood_value: float):
         """Set the pet's mood based on focus history (0=angry, 100=ecstatic)."""
         if hasattr(self, 'procedural_pet') and self.procedural_pet:
@@ -184,6 +223,14 @@ class PetWindow(QWidget):
             self.pet_reaction_timer -= 1
             if self.pet_reaction_timer <= 0:
                 self.pet_was_petted = False
+
+        # Update custom speech bubble timer
+        if getattr(self, 'force_bubble', False):
+            self.bubble_timer += 1
+            if self.bubble_timer > getattr(self, 'bubble_max_duration', 120):
+                self.force_bubble = False
+                self.bubble_text = ""
+                self.bubble_timer = 0
         
         # Cursor proximity detection (only at IDLE level)
         if self.level == 0 and hasattr(self, 'procedural_pet') and self.procedural_pet:
@@ -393,8 +440,8 @@ class PetWindow(QWidget):
                 painter.setPen(QColor(180, 180, 255, int(p['alpha'])))
                 painter.drawText(int(p['x']), int(p['y']), p['text'])
 
-        # Level 1 Dialogue speech bubble (enhanced with drop shadow style)
-        if self.level == 1 and self.bubble_text:
+        # Dialogue speech bubble (renders on Level 1 or when custom bubble triggered)
+        if (self.level == 1 or getattr(self, 'force_bubble', False)) and self.bubble_text:
             bubble_w = 140
             bubble_h = 32
             bx = 90 - bubble_w // 2

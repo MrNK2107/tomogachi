@@ -11,9 +11,17 @@ logger = logging.getLogger("HeartbeatClient")
 class HeartbeatClient:
     """Sends periodic heartbeats from the laptop to the Cloud Sentinel."""
 
-    def __init__(self, idle_detector: IdleDetector, agent_detector: AgentDetector):
+    def __init__(
+        self,
+        idle_detector: IdleDetector,
+        agent_detector: AgentDetector,
+        state_provider=None,
+        action_callback=None,
+    ):
         self.idle_detector = idle_detector
         self.agent_detector = agent_detector
+        self.state_provider = state_provider
+        self.action_callback = action_callback
         self.is_running = False
 
     async def start(self):
@@ -37,7 +45,7 @@ class HeartbeatClient:
         self.is_running = False
 
     def send_heartbeat(self):
-        """Dispatches single heartbeat payload to cloud server."""
+        """Dispatches single heartbeat payload to cloud server and executes returned actions."""
         if not config.CLOUD_SERVER_URL:
             return
 
@@ -47,15 +55,35 @@ class HeartbeatClient:
             "is_idle": self.idle_detector.is_idle(config.IDLE_THRESHOLD_MINUTES),
             "has_agents": self.agent_detector.is_agent_active(),
             "agents_summary": self.agent_detector.get_summary_text(),
-            "timestamp": time.time()
+            "timestamp": time.time(),
         }
+
+        if self.state_provider and callable(self.state_provider):
+            try:
+                extra = self.state_provider()
+                if isinstance(extra, dict):
+                    payload.update(extra)
+            except Exception as e:
+                logger.warning(f"Error invoking state_provider in heartbeat: {e}")
 
         url = f"{config.CLOUD_SERVER_URL}/api/heartbeat"
         try:
             resp = requests.post(url, json=payload, timeout=5.0)
             if resp.status_code == 200:
                 logger.debug("Cloud heartbeat acknowledged (200 OK).")
+                try:
+                    data = resp.json()
+                    actions = data.get("actions", [])
+                    if actions and self.action_callback and callable(self.action_callback):
+                        for act in actions:
+                            try:
+                                self.action_callback(act)
+                            except Exception as e:
+                                logger.error(f"Error handling cloud action '{act}': {e}")
+                except Exception:
+                    pass
             else:
                 logger.warning(f"Cloud heartbeat returned status: {resp.status_code}")
         except Exception as e:
             logger.warning(f"Could not reach cloud server at {url}: {e}")
+

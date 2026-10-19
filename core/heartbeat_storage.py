@@ -9,6 +9,7 @@ class HeartbeatStorage:
     def __init__(self):
         self.file_path = config.HEARTBEAT_FILE
         self._memory_cache: Optional[Dict[str, Any]] = self._load()
+        self._pending_actions: list = []
 
     def _load(self) -> Optional[Dict[str, Any]]:
         if self.file_path.exists():
@@ -34,3 +35,13 @@ class HeartbeatStorage:
         if self._memory_cache:
             return self._memory_cache
         return self._load()
+
+    def queue_action(self, action: str):
+        """Queues a remote action to be picked up by the laptop."""
+        self._pending_actions.append(action)
+
+    def pop_pending_actions(self) -> list:
+        """Returns and flushes all pending actions."""
+        actions = list(self._pending_actions)
+        self._pending_actions.clear()
+        return actions

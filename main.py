@@ -29,6 +29,9 @@ from core.heartbeat_client import HeartbeatClient
 from core.idle_detector import IdleDetector
 from core.agent_detector import AgentDetector
 from quiz.quiz_manager import QuizManager
+from core.git_tracker import GitTracker
+from core.voice_alert import VoiceAlert
+from core.system_sentinel import SystemSentinel
 
 class FocusHistory:
     """Tracks focus scores over time for statistics display."""
@@ -106,7 +109,8 @@ class SettingsPanel(QWidget):
     """
     def __init__(self, engine, pet_window, screen_overlay, cv_worker, activity_worker, mic_worker, window_worker,
                  context_worker=None, mouse_worker=None, clipboard_worker=None,
-                 agent_worker=None, telegram_worker=None):
+                 agent_worker=None, telegram_worker=None,
+                 git_tracker=None, voice_alert=None, system_sentinel=None):
         super().__init__()
         self.engine = engine
         self.pet_window = pet_window
@@ -120,6 +124,13 @@ class SettingsPanel(QWidget):
         self.clipboard_worker = clipboard_worker
         self.agent_worker = agent_worker
         self.telegram_worker = telegram_worker
+        self.git_tracker = git_tracker or GitTracker()
+        self.voice_alert = voice_alert or VoiceAlert(enabled=True)
+        self.system_sentinel = system_sentinel or SystemSentinel(
+            git_tracker=self.git_tracker,
+            idle_detector=IdleDetector(),
+            agent_detector=AgentDetector(),
+        )
         
         self.config = config_manager.load_config()
         self.latest_is_focused = True
@@ -150,6 +161,7 @@ class SettingsPanel(QWidget):
             self.agent_worker.agent_update.connect(self.on_agent_update)
         if self.telegram_worker:
             self.telegram_worker.quiz_solved.connect(self.on_quiz_solved)
+            self.telegram_worker.pet_action.connect(self.on_pet_action)
             self.telegram_worker.set_pet_state_getter(self.get_live_pet_state)
 
         self.setWindowTitle("Desktop Focus Pet - Control Dashboard")
@@ -520,6 +532,14 @@ class SettingsPanel(QWidget):
         self.telegram_badge_lbl.setStyleSheet("color: #00f5d4; font-weight: bold;")
         sensor_badges_layout.addWidget(self.telegram_badge_lbl)
 
+        self.git_badge_lbl = QLabel("🌱 Git: Detecting repository...")
+        self.git_badge_lbl.setStyleSheet("color: #8f94a8;")
+        sensor_badges_layout.addWidget(self.git_badge_lbl)
+
+        self.hardware_badge_lbl = QLabel("💻 Hardware: Checking status...")
+        self.hardware_badge_lbl.setStyleSheet("color: #8f94a8;")
+        sensor_badges_layout.addWidget(self.hardware_badge_lbl)
+
         metrics_layout.addLayout(sensor_badges_layout)
 
         # Reset Score Button
@@ -866,6 +886,8 @@ class SettingsPanel(QWidget):
         if is_correct:
             self.engine.heal_focus(25.0)
             self.focus_history.focused_time += 120.0
+            self.pet_window.trigger_feed_animation()
+            self.voice_alert.play_tone("happy")
             if hasattr(self, 'tray_icon') and self.tray_icon:
                 self.tray_icon.showMessage(
                     "🐾 Pet Fed via Telegram!",
@@ -875,9 +897,64 @@ class SettingsPanel(QWidget):
                 )
         else:
             self.engine.penalize_focus(10.0)
+            self.pet_window.show_custom_bubble("Wrong answer! Keep grinding! 💢", 100)
+            self.voice_alert.play_tone("warning")
+
+    def on_pet_action(self, action: str):
+        """Handles remote action commands sent from phone via Telegram or Cloud Heartbeat."""
+        action = str(action).strip()
+        if action == "alarm":
+            self.pet_window.trigger_alarm_animation()
+            self.voice_alert.play_tone("alarm")
+            self.voice_alert.speak("Attention! Wake up and focus on your work!")
+            if hasattr(self, 'tray_icon') and self.tray_icon:
+                self.tray_icon.showMessage(
+                    "🚨 Desk Alarm Triggered via Phone!",
+                    "Telegram companion sounded desk alarm!",
+                    QSystemTrayIcon.MessageIcon.Warning,
+                    4000
+                )
+        elif action == "feed":
+            self.engine.heal_focus(20.0)
+            self.pet_window.trigger_feed_animation()
+            self.voice_alert.play_tone("happy")
+            if hasattr(self, 'tray_icon') and self.tray_icon:
+                self.tray_icon.showMessage(
+                    "🐾 Pet Fed via Telegram!",
+                    "Desktop pet fed with treats! Focus boosted. ✨",
+                    QSystemTrayIcon.MessageIcon.Information,
+                    2500
+                )
+        elif action == "poke":
+            self.pet_window.trigger_poke_animation()
+            self.voice_alert.play_tone("warning")
+        elif action.startswith("focus:"):
+            try:
+                val = float(action.split(":", 1)[1])
+                self.engine.heal_focus(val)
+                self.pet_window.show_custom_bubble(f"Focus Sprint +{int(val)}m! ✨", 120)
+                self.voice_alert.play_tone("happy")
+            except Exception:
+                pass
+        elif action == "boss":
+            self.engine.distraction_score = 100.0
+            self.pet_window.show_custom_bubble("🚨 BOSS APPROACHING! 🚨", 150)
+            self.pet_window.set_level(3)
+            self.voice_alert.speak("Boss mode activated. Focus immediately.")
+        elif action == "sound:off":
+            self.voice_alert.enabled = False
+            self.pet_window.show_custom_bubble("🔇 Audio Muted", 80)
+        elif action == "sound:on":
+            self.voice_alert.enabled = True
+            self.pet_window.show_custom_bubble("🔊 Audio Enabled", 80)
+            self.voice_alert.play_tone("happy")
 
     def get_live_pet_state(self) -> dict:
-        """Returns live pet telemetry for Telegram companion bot."""
+        """Returns live pet telemetry for Telegram companion bot and cloud heartbeat."""
+        hw = self.system_sentinel.get_hardware_telemetry() if hasattr(self, 'system_sentinel') else {}
+        git_info = hw.get("git", {})
+        git_sum = git_info.get("summary", "Git: Not detected") if isinstance(git_info, dict) else str(git_info)
+
         return {
             "pet_type": getattr(self.pet_window, 'species', 'Cyber Pet'),
             "mood": self.focus_history.get_recent_mood(),
@@ -885,6 +962,13 @@ class SettingsPanel(QWidget):
             "level": self.engine.get_level(),
             "streak": self.focus_history.get_current_streak(),
             "agents_summary": self.latest_agents_summary,
+            "active_window": self.latest_window_title,
+            "active_window_class": self.latest_app_context,
+            "cpu_percent": hw.get("cpu_percent", 0.0),
+            "ram_percent": hw.get("ram_percent", 0.0),
+            "battery_percent": hw.get("battery_percent", 100),
+            "is_plugged": hw.get("is_plugged", True),
+            "git_summary": git_sum,
         }
 
     def on_frame_ready(self, frame):
@@ -900,6 +984,10 @@ class SettingsPanel(QWidget):
         self.preview_lbl.setPixmap(pix.scaled(self.preview_lbl.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
 
     def on_tick(self):
+        # Update window context in system sentinel
+        if hasattr(self, 'system_sentinel') and self.system_sentinel:
+            self.system_sentinel.update_window_context(self.latest_window_title, self.latest_app_context)
+
         # Update Multimodal Fused Distraction Score with 8 Sensors
         score = self.engine.update_fused(
             is_vision_focused=self.latest_is_focused, 
@@ -930,6 +1018,61 @@ class SettingsPanel(QWidget):
             
             # Update mood display
             self.update_mood_display(mood_value)
+
+            # Update Git status badge
+            git_data = self.git_tracker.get_summary()
+            if hasattr(self, 'git_badge_lbl'):
+                self.git_badge_lbl.setText(git_data.get("summary", "🌱 Git: Idle"))
+                if git_data.get("is_repo"):
+                    self.git_badge_lbl.setStyleSheet("color: #00f5d4; font-weight: bold;")
+                else:
+                    self.git_badge_lbl.setStyleSheet("color: #8f94a8;")
+
+            # Update Hardware status badge
+            hw = self.system_sentinel.get_hardware_telemetry()
+            if hasattr(self, 'hardware_badge_lbl'):
+                bat_pct = hw.get("battery_percent", 100)
+                plugged = hw.get("is_plugged", True)
+                pwr_str = f"⚡ {bat_pct}%" if plugged else f"🔋 {bat_pct}%"
+                self.hardware_badge_lbl.setText(f"💻 HW: CPU {hw.get('cpu_percent', 0.0):.0f}% | RAM {hw.get('ram_percent', 0.0):.0f}% | {pwr_str}")
+                if bat_pct <= 20 and not plugged:
+                    self.hardware_badge_lbl.setStyleSheet("color: #ff0844; font-weight: bold;")
+                else:
+                    self.hardware_badge_lbl.setStyleSheet("color: #00f5d4;")
+
+            # System Sentinel event evaluation & creative attention-grabbing alerts
+            events = self.system_sentinel.tick(self.latest_input_active, dt=1.0)
+            for event in events:
+                etype = event.get("type")
+                if etype == "DOOMSCROLL_DETECTED":
+                    win_title = event.get("window_title", "Distraction")
+                    dwell = event.get("dwell_seconds", 120.0)
+                    self.pet_window.show_custom_bubble(f"Doomscrolling on {win_title[:18]}? Focus up! 🚨", 150)
+                    self.voice_alert.speak(f"Distraction alert! You have spent over two minutes on {win_title[:25]}. Return to work.")
+                    self.voice_alert.play_tone("warning")
+                    if self.telegram_worker:
+                        self.telegram_worker.dispatch_doomscroll_alert(win_title, dwell)
+                elif etype == "AGENT_FINISHED":
+                    agent_name = event.get("previous_agent", "Agent")
+                    self.pet_window.show_custom_bubble(f"AI Task Finished: {agent_name[:18]}! Check output ⚡", 150)
+                    self.voice_alert.speak("Notice: Background AI agent task has completed.")
+                    self.voice_alert.play_tone("happy")
+                    if self.telegram_worker:
+                        self.telegram_worker.dispatch_agent_finished_alert(agent_name)
+                elif etype == "BATTERY_LOW":
+                    pct = event.get("percent", 15)
+                    self.pet_window.show_custom_bubble(f"Battery Critical ({pct}%)! Plug in charger! 🔋", 150)
+                    self.voice_alert.speak(f"Warning: Laptop battery is at {pct} percent. Please connect charger.")
+                    self.voice_alert.play_tone("alarm")
+                    if self.telegram_worker:
+                        self.telegram_worker.dispatch_battery_alert(pct)
+                elif etype == "ERGONOMIC_BREAK":
+                    sess_min = event.get("session_minutes", 60.0)
+                    self.pet_window.show_custom_bubble("Time to stretch and hydrate! 💧", 150)
+                    self.voice_alert.speak("Time for a quick stretch and water break. Great focus session.")
+                    self.voice_alert.play_tone("happy")
+                    if self.telegram_worker:
+                        self.telegram_worker.dispatch_break_reminder(sess_min)
 
         # Update Audio safeguard status
         is_silent = audio_guard.is_audio_silent_mode()
@@ -991,6 +1134,17 @@ class SettingsPanel(QWidget):
         else:
             self.popup_spawn_ticks = 0
             self.clear_all_popups()
+
+        # Check desk inactivity away alert (idle > IDLE_THRESHOLD_MINUTES)
+        idle_min = self.latest_idle_sec / 60.0
+        if idle_min >= config.IDLE_THRESHOLD_MINUTES:
+            self.away_alert_tick_counter += 1
+            # Dispatch at threshold, then every 15 minutes (9000 ticks at 100ms)
+            if self.away_alert_tick_counter == 1 or self.away_alert_tick_counter % 9000 == 0:
+                if self.telegram_worker:
+                    self.telegram_worker.dispatch_away_alert(idle_min, self.latest_agents_summary)
+        else:
+            self.away_alert_tick_counter = 0
 
     def update_statistics(self):
         """Update the statistics panel with latest focus data."""
@@ -1152,8 +1306,17 @@ def main():
     if config.get("autostart", False):
         config_manager.set_windows_autostart(True)
     
-    # Initialize Core Engines
+    # Initialize Core Engines & Sentinels
     engine = IntensityEngine()
+    git_tracker = GitTracker()
+    voice_alert = VoiceAlert(enabled=True)
+    idle_det = IdleDetector()
+    agent_det = AgentDetector()
+    system_sentinel = SystemSentinel(
+        git_tracker=git_tracker,
+        idle_detector=idle_det,
+        agent_detector=agent_det,
+    )
     
     # Initialize Overlay Windows
     screen_overlay = ScreenOverlay()
@@ -1175,7 +1338,7 @@ def main():
     window_worker = WindowTrackerWorker()
     window_worker.start()
     
-    # Initialize new focus sensor workers
+    # Initialize focus sensor workers
     context_worker = ContextScannerWorker()
     context_worker.start()
     
@@ -1198,7 +1361,8 @@ def main():
     settings_panel = SettingsPanel(
         engine, pet_window, screen_overlay, cv_worker, activity_worker, mic_worker, window_worker,
         context_worker=context_worker, mouse_worker=mouse_worker, clipboard_worker=clipboard_worker,
-        agent_worker=agent_worker, telegram_worker=telegram_worker
+        agent_worker=agent_worker, telegram_worker=telegram_worker,
+        git_tracker=git_tracker, voice_alert=voice_alert, system_sentinel=system_sentinel,
     )
 
     # Record PID for status and stop utilities
@@ -1223,9 +1387,12 @@ def main():
 
     # Start periodic heartbeat to cloud server if configured
     if config.CLOUD_SERVER_URL:
-        idle_det = IdleDetector()
-        agent_det = AgentDetector()
-        heartbeat_client = HeartbeatClient(idle_det, agent_det)
+        heartbeat_client = HeartbeatClient(
+            idle_det,
+            agent_det,
+            state_provider=settings_panel.get_live_pet_state,
+            action_callback=settings_panel.on_pet_action,
+        )
         heartbeat_timer = QTimer()
         heartbeat_timer.timeout.connect(heartbeat_client.send_heartbeat)
         heartbeat_timer.start(config.HEARTBEAT_INTERVAL_SECONDS * 1000)

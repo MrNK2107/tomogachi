@@ -1,6 +1,7 @@
 import asyncio
 import datetime
 import logging
+import random
 import re
 from typing import Optional, Dict, Any
 
@@ -34,10 +35,12 @@ class TelegramService:
         quiz_manager: QuizManager,
         idle_detector: IdleDetector,
         agent_detector: AgentDetector,
+        heartbeat_storage=None,
     ):
         self.quiz_manager = quiz_manager
         self.idle_detector = idle_detector
         self.agent_detector = agent_detector
+        self.heartbeat_storage = heartbeat_storage
         self.app: Optional[Application] = None
         self.chat_id: Optional[str] = config.TELEGRAM_CHAT_ID or None
         self.snooze_until: Optional[datetime.datetime] = None
@@ -55,6 +58,14 @@ class TelegramService:
         self.app.add_handler(CommandHandler("help", self._cmd_help))
         self.app.add_handler(CommandHandler("status", self._cmd_status))
         self.app.add_handler(CommandHandler("pet", self._cmd_status))
+        self.app.add_handler(CommandHandler("snap", self._cmd_snap))
+        self.app.add_handler(CommandHandler("screen", self._cmd_snap))
+        self.app.add_handler(CommandHandler("alarm", self._cmd_alarm))
+        self.app.add_handler(CommandHandler("ping", self._cmd_alarm))
+        self.app.add_handler(CommandHandler("focus", self._cmd_focus))
+        self.app.add_handler(CommandHandler("feed", self._cmd_feed))
+        self.app.add_handler(CommandHandler("poke", self._cmd_poke))
+        self.app.add_handler(CommandHandler("boss", self._cmd_boss))
         self.app.add_handler(CommandHandler("quiz", self._cmd_quiz))
         self.app.add_handler(CommandHandler("leetcode", self._cmd_leetcode))
         self.app.add_handler(CommandHandler("topic", self._cmd_topic))
@@ -196,8 +207,12 @@ class TelegramService:
 
         keyboard = [
             [
-                InlineKeyboardButton("📊 Status", callback_data="btn_status"),
+                InlineKeyboardButton("📸 Desktop Snap", callback_data="btn_snap"),
                 InlineKeyboardButton("🧠 Quick Quiz", callback_data="btn_quiz"),
+            ],
+            [
+                InlineKeyboardButton("🚨 Desk Alarm", callback_data="btn_alarm"),
+                InlineKeyboardButton("🥩 Feed Pet", callback_data="btn_feed"),
             ],
             [
                 InlineKeyboardButton("💻 Daily LeetCode", callback_data="btn_leetcode"),
@@ -207,13 +222,17 @@ class TelegramService:
         text = (
             "🐾 *Awaken Placement Sentinel is Online!*\n\n"
             f"✅ Linked to Chat ID: `{chat_id}`\n\n"
-            "Your placement companion is actively tracking your accountability.\n\n"
+            "Your 24/7 cloud placement sentinel & desktop companion.\n\n"
             "*Available Commands:*\n"
-            "• `/status` — Check active agents & desktop idle status\n"
+            "• `/snap` — Real-time snapshot of your desktop (active window, hardware, Git)\n"
+            "• `/alarm` — Remotely trigger sound, voice alarm & pet jump on laptop\n"
+            "• `/focus <mins>` — Start a Pomodoro deep work sprint (e.g. `/focus 25`)\n"
+            "• `/feed` / `/poke` — Interact directly with your desktop pet\n"
+            "• `/boss` — Sudden Death Boss Fight: 3 rapid-fire placement questions\n"
             "• `/quiz` — Solve curated placement MCQs (DSA, OS, DBMS, CN)\n"
             "• `/leetcode` — Curated problem of the day with key patterns\n"
-            "• `/roast` — Brutal reality check on demand\n"
-            "• `/stats` — Accuracy streaks and stats\n"
+            "• `/roast` — Contextual reality check on demand\n"
+            "• `/stats` — Accuracy streaks, repository stats, focus hours\n"
             "• `/snooze <mins>` — Pause alerts (e.g. `/snooze 30`)\n"
             "• `/resume` — Resume alerts immediately"
         )
@@ -224,28 +243,79 @@ class TelegramService:
     async def _cmd_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         await self._cmd_start(update, context)
 
-    async def _cmd_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        idle_mins = self.idle_detector.get_idle_minutes()
-        agents = self.agent_detector.get_summary_text()
-        state = "Active" if idle_mins < config.IDLE_THRESHOLD_MINUTES else f"Away ({idle_mins:.1f}m)"
+    async def _cmd_snap(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        hb = self.heartbeat_storage.get_heartbeat() if self.heartbeat_storage else {}
+        win = hb.get("active_window", "Desktop") if hb else "Desktop"
+        win_class = hb.get("active_window_class", "NEUTRAL") if hb else "NEUTRAL"
+        cpu = hb.get("cpu_percent", 0.0) if hb else 0.0
+        ram = hb.get("ram_percent", 0.0) if hb else 0.0
+        bat = hb.get("battery_percent", 100) if hb else 100
+        plugged = hb.get("is_plugged", True) if hb else True
+        git_summary = hb.get("git_summary", "Git: Not detected") if hb else "Git: Not detected"
+        mood = hb.get("pet_mood", 85.0) if hb else 85.0
+        agents = hb.get("agents_summary", "None") if hb else self.agent_detector.get_summary_text()
+
+        class_emoji = "🟢 PRODUCTIVE" if win_class == "PRODUCTIVE" else ("🔴 DISTRACTING" if win_class == "DISTRACTING" else "⚪ NEUTRAL")
+        pwr_str = f"⚡ {bat}% (Charging)" if plugged else f"🔋 {bat}% (Battery)"
+        disp_win = win if len(win) <= 40 else win[:37] + "..."
 
         msg = (
-            "📊 *Sentinel System Status:*\n\n"
-            f"• *User State:* `{state}`\n"
-            f"• *Idle Time:* `{idle_mins:.1f} minutes`\n"
-            f"• *Background Agents:* `{agents}`\n"
-            f"• *Alerts Snoozed:* `{'Yes' if self.is_snoozed() else 'No'}`\n"
-            f"• *Quiz Streak:* 🔥 `{self.quiz_manager.stats.get('streak', 0)} in a row`"
+            "📸 *Desktop Live Snapshot:*\n\n"
+            f"🪟 *Foreground Window:*\n`{disp_win}`\n"
+            f"📊 *Context:* {class_emoji}\n\n"
+            f"💻 *Hardware:* CPU: `{cpu:.0f}%` | RAM: `{ram:.0f}%` | {pwr_str}\n"
+            f"🌿 *Git:* `{git_summary}`\n"
+            f"🤖 *Active Agents:* `{agents}`\n"
+            f"🐾 *Pet Mood:* `{mood:.0f}%`"
         )
         keyboard = [
             [
+                InlineKeyboardButton("🔄 Refresh Snap", callback_data="btn_snap"),
+                InlineKeyboardButton("🚨 Desk Alarm", callback_data="btn_alarm"),
+            ],
+            [
+                InlineKeyboardButton("🥩 Feed Pet", callback_data="btn_feed"),
                 InlineKeyboardButton("🧠 Quick Quiz", callback_data="btn_quiz"),
-                InlineKeyboardButton("🔄 Refresh", callback_data="btn_status"),
             ]
         ]
+        await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
+
+    async def _cmd_alarm(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if self.heartbeat_storage:
+            self.heartbeat_storage.queue_action("alarm")
+        await update.message.reply_text("🚨 *DESK ALARM DISPATCHED!* Your laptop will sound voice & audio alerts!", parse_mode="Markdown")
+
+    async def _cmd_focus(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        mins = 25
+        if context.args:
+            try:
+                mins = int(context.args[0])
+            except ValueError:
+                pass
+        if self.heartbeat_storage:
+            self.heartbeat_storage.queue_action(f"focus:{mins}")
+        await update.message.reply_text(f"🎯 *Focus Sprint Started ({mins} mins)!* Lock in!", parse_mode="Markdown")
+
+    async def _cmd_feed(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if self.heartbeat_storage:
+            self.heartbeat_storage.queue_action("feed")
+        await update.message.reply_text("🥩 *You fed your desktop pet!* (+10 Mood points ✨)", parse_mode="Markdown")
+
+    async def _cmd_poke(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if self.heartbeat_storage:
+            self.heartbeat_storage.queue_action("poke")
+        await update.message.reply_text("👉 *Poked your pet remotely!*", parse_mode="Markdown")
+
+    async def _cmd_boss(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
-            msg, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard)
+            "⚔️ *SUDDEN DEATH BOSS FIGHT!* 🐲\n\n"
+            "Placement MCQs incoming! Clear your mind and solve accurately! 🔥",
+            parse_mode="Markdown"
         )
+        await self.send_quiz(chat_id=str(update.effective_chat.id))
+
+    async def _cmd_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await self._cmd_snap(update, context)
 
     async def _cmd_quiz(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         category = context.args[0] if context.args else None
@@ -307,18 +377,12 @@ class TelegramService:
         data = query.data
         chat_id = str(query.message.chat_id)
 
-        if data in ("btn_status", "btn_pet_status"):
-            idle_mins = self.idle_detector.get_idle_minutes()
-            agents = self.agent_detector.get_summary_text()
-            state = "Active" if idle_mins < config.IDLE_THRESHOLD_MINUTES else f"Away ({idle_mins:.1f}m)"
-            msg = (
-                "📊 *Sentinel Status:*\n\n"
-                f"• *User State:* `{state}`\n"
-                f"• *Idle Time:* `{idle_mins:.1f} minutes`\n"
-                f"• *Background Agents:* `{agents}`\n"
-                f"• *Quiz Streak:* 🔥 `{self.quiz_manager.stats.get('streak', 0)}`"
-            )
-            await query.message.reply_text(msg, parse_mode="Markdown")
+        if data in ("btn_status", "btn_pet_status", "btn_snap"):
+            await self._cmd_snap(query, context)
+        elif data == "btn_alarm":
+            await self._cmd_alarm(query, context)
+        elif data == "btn_feed":
+            await self._cmd_feed(query, context)
         elif data in ("btn_quiz", "quiz_random"):
             await self.send_quiz(chat_id=chat_id)
         elif data in ("btn_leetcode", "daily_leetcode"):

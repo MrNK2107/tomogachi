@@ -3,7 +3,7 @@ import logging
 import time
 import sys
 from contextlib import asynccontextmanager
-from typing import Optional
+from typing import Optional, Dict, Any
 
 # Ensure UTF-8 output
 if sys.platform == "win32":
@@ -39,13 +39,22 @@ class HeartbeatPayload(BaseModel):
     has_agents: bool
     agents_summary: str
     timestamp: float
+    active_window: Optional[str] = "Desktop"
+    battery_percent: Optional[float] = None
+    battery_plugged: Optional[bool] = None
+    cpu_percent: Optional[float] = None
+    git_summary: Optional[Dict[str, Any]] = None
+    pet_mood: Optional[float] = 100.0
+    energy: Optional[float] = 100.0
+    hunger: Optional[float] = 0.0
+    snapshot_base64: Optional[str] = None
 
 # Singletons
 heartbeat_storage = HeartbeatStorage()
 quiz_manager = QuizManager()
 dummy_idle = IdleDetector()
 dummy_agent = AgentDetector()
-telegram_service = TelegramService(quiz_manager, dummy_idle, dummy_agent)
+telegram_service = TelegramService(quiz_manager, dummy_idle, dummy_agent, heartbeat_storage=heartbeat_storage)
 cloud_sentinel = CloudSentinel(telegram_service, heartbeat_storage)
 
 @asynccontextmanager
@@ -93,13 +102,17 @@ async def root():
         else:
             laptop_state = f"ASLEEP / TURNED OFF ({mins_ago}m ago)"
 
+    git_info = hb.get("git_summary") if hb else None
     return {
         "service": "⚡ Awaken Cloud Sentinel",
         "status": "online",
         "telegram_bot": "@idle_alerter_bot",
         "laptop_status": laptop_state,
         "last_heartbeat_minutes_ago": mins_ago,
+        "active_window": hb.get("active_window") if hb else "None",
+        "battery_percent": hb.get("battery_percent") if hb else None,
         "agents_summary": hb.get("agents_summary") if hb else "None",
+        "git_summary": git_info.get("summary") if isinstance(git_info, dict) else "None",
     }
 
 @app.post("/api/heartbeat")
@@ -108,8 +121,9 @@ async def receive_heartbeat(payload: HeartbeatPayload):
         raise HTTPException(status_code=403, detail="Invalid heartbeat secret")
 
     heartbeat_storage.save_heartbeat(payload.model_dump())
-    logger.info(f"Heartbeat received: idle={payload.idle_seconds:.1f}s | agents={payload.agents_summary}")
-    return {"ok": True, "message": "Heartbeat recorded"}
+    actions = heartbeat_storage.pop_pending_actions()
+    logger.info(f"Heartbeat received: idle={payload.idle_seconds:.1f}s | agents={payload.agents_summary} | actions={len(actions)}")
+    return {"ok": True, "message": "Heartbeat recorded", "actions": actions}
 
 @app.get("/api/status")
 async def get_status():

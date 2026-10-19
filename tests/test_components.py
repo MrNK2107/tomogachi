@@ -352,6 +352,95 @@ class TestAwakenIntegration(unittest.TestCase):
         self.assertIn("options", q)
         self.assertEqual(len(q["options"]), 4)
 
+    def test_git_tracker(self):
+        from core.git_tracker import GitTracker
+        tracker = GitTracker()
+        summary = tracker.get_summary()
+        self.assertIsInstance(summary, dict)
+        self.assertIn("branch", summary)
+        self.assertIn("summary", summary)
+
+    def test_system_sentinel_doomscroll(self):
+        import time
+        from core.system_sentinel import SystemSentinel
+        sentinel = SystemSentinel()
+        sentinel.update_window_context("YouTube - Shorts", "DISTRACTING")
+        sentinel.window_dwell_start = time.time() - 130.0  # 130s dwell
+        events = sentinel.tick(is_input_active=True, dt=1.0)
+        doomscroll_events = [e for e in events if e.get("type") == "DOOMSCROLL_DETECTED"]
+        self.assertEqual(len(doomscroll_events), 1)
+        self.assertEqual(doomscroll_events[0]["window_title"], "YouTube - Shorts")
+
+    def test_system_sentinel_hardware_telemetry(self):
+        from core.system_sentinel import SystemSentinel
+        sentinel = SystemSentinel()
+        hw = sentinel.get_hardware_telemetry()
+        self.assertIn("cpu_percent", hw)
+        self.assertIn("ram_percent", hw)
+        self.assertIn("battery_percent", hw)
+        self.assertIn("git", hw)
+
+    def test_heartbeat_storage_actions(self):
+        from core.heartbeat_storage import HeartbeatStorage
+        storage = HeartbeatStorage()
+        storage.queue_action("alarm")
+        storage.queue_action("feed")
+        actions = storage.pop_pending_actions()
+        self.assertEqual(actions, ["alarm", "feed"])
+        self.assertEqual(storage.pop_pending_actions(), [])
+
+    def test_voice_alert_interface(self):
+        from core.voice_alert import VoiceAlert
+        va = VoiceAlert(enabled=True)
+        self.assertTrue(va.enabled)
+        va.play_tone("alert")
+        va.speak("Test voice")
+
+    def test_pet_gui_actions(self):
+        from pet_gui import PetWindow
+        pet = PetWindow()
+        pet.show_custom_bubble("Focus now!")
+        self.assertEqual(pet.bubble_text, "Focus now!")
+        pet.trigger_alarm_animation()
+        self.assertTrue(pet.is_knocking)
+        pet.trigger_feed_animation()
+        self.assertTrue(pet.pet_was_petted)
+        pet.trigger_poke_animation()
+        pet.close()
+
+    def test_cloud_server_heartbeat_and_actions(self):
+        import time
+        import config
+        from fastapi.testclient import TestClient
+        from cloud_server import app, heartbeat_storage
+
+        client = TestClient(app)
+        heartbeat_storage.queue_action("feed")
+
+        payload = {
+            "secret": config.HEARTBEAT_SECRET,
+            "idle_seconds": 15.0,
+            "is_idle": False,
+            "has_agents": True,
+            "agents_summary": "Claude Code",
+            "timestamp": time.time(),
+            "active_window": "PyCharm",
+            "battery_percent": 88.0,
+            "git_summary": {"summary": "Git: Clean"}
+        }
+
+        resp = client.post("/api/heartbeat", json=payload)
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertTrue(data.get("ok"))
+        self.assertIn("feed", data.get("actions", []))
+
+        # Root endpoint
+        root_resp = client.get("/")
+        self.assertEqual(root_resp.status_code, 200)
+        root_data = root_resp.json()
+        self.assertEqual(root_data.get("active_window"), "PyCharm")
+
 if __name__ == '__main__':
     unittest.main()
 
