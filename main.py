@@ -1367,8 +1367,8 @@ def main():
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)  # Keep running daemon when main window is hidden
     
-    config = config_manager.load_config()
-    if config.get("autostart", False):
+    app_cfg = config_manager.load_config()
+    if app_cfg.get("autostart", False):
         config_manager.set_windows_autostart(True)
     
     # Initialize Core Engines & Sentinels
@@ -1413,6 +1413,9 @@ def main():
     
     mouse_worker = MouseAnalyticsWorker()
     mouse_worker.start()
+
+    clipboard_worker = ClipboardTrackerWorker()
+    clipboard_worker.start()
     
     # Initialize AI Agent Tracker & Telegram Companion Workers
     quiz_manager = QuizManager()
