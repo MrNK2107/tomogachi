@@ -43,11 +43,13 @@ class HeartbeatPayload(BaseModel):
     battery_percent: Optional[float] = None
     battery_plugged: Optional[bool] = None
     cpu_percent: Optional[float] = None
-    git_summary: Optional[Dict[str, Any]] = None
+    git_summary: Optional[Any] = None
     pet_mood: Optional[float] = 100.0
     energy: Optional[float] = 100.0
     hunger: Optional[float] = 0.0
     snapshot_base64: Optional[str] = None
+
+    model_config = {"extra": "allow"}
 
 # Singletons
 heartbeat_storage = HeartbeatStorage()
@@ -112,7 +114,7 @@ async def root():
         "active_window": hb.get("active_window") if hb else "None",
         "battery_percent": hb.get("battery_percent") if hb else None,
         "agents_summary": hb.get("agents_summary") if hb else "None",
-        "git_summary": git_info.get("summary") if isinstance(git_info, dict) else "None",
+        "git_summary": git_info.get("summary") if isinstance(git_info, dict) else (str(git_info) if git_info else "None"),
     }
 
 @app.post("/api/heartbeat")
