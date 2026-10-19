@@ -1,5 +1,6 @@
 import asyncio
 import datetime
+import io
 import logging
 import random
 import re
@@ -15,6 +16,8 @@ from telegram.ext import (
     CommandHandler,
     CallbackQueryHandler,
     PollAnswerHandler,
+    MessageHandler,
+    filters,
     ContextTypes,
 )
 
@@ -29,7 +32,7 @@ class TelegramBotWorker(QThread):
 
     # Signals to PyQt6 main thread
     quiz_solved = pyqtSignal(bool, str)  # (is_correct, explanation) -> heals pet
-    pet_action = pyqtSignal(str)         # ("feed", "pet", "poke", "alarm", "focus:25", "sound:on|off")
+    pet_action = pyqtSignal(str)         # ("feed", "pet", "poke", "alarm", "pet:show", "pet:hide", "open:leetcode", etc.)
 
     def __init__(self, quiz_manager: QuizManager, parent=None):
         super().__init__(parent)
@@ -39,11 +42,16 @@ class TelegramBotWorker(QThread):
         self.running = True
         self.loop = None
         self.snooze_until = None
-        self.pet_state_getter = None  # Callable returning live telemetry dict
+        self.pet_state_getter = None       # Callable returning live telemetry dict
+        self.screenshot_getter = None      # Callable returning JPEG screenshot bytes
 
     def set_pet_state_getter(self, getter_fn):
         """Sets a callback function to get live pet metrics from Qt main thread."""
         self.pet_state_getter = getter_fn
+
+    def set_screenshot_getter(self, getter_fn):
+        """Sets a callback function to capture desktop screen bytes from Qt main thread."""
+        self.screenshot_getter = getter_fn
 
     def run(self):
         if not config.TELEGRAM_BOT_TOKEN:
@@ -68,11 +76,18 @@ class TelegramBotWorker(QThread):
         self.app.add_handler(CommandHandler("start", self._cmd_start))
         self.app.add_handler(CommandHandler("help", self._cmd_help))
         self.app.add_handler(CommandHandler("pet", self._cmd_pet))
+        self.app.add_handler(CommandHandler("show", self._cmd_show_pet))
+        self.app.add_handler(CommandHandler("hide", self._cmd_hide_pet))
         self.app.add_handler(CommandHandler("status", self._cmd_pet))
         self.app.add_handler(CommandHandler("snap", self._cmd_snap))
         self.app.add_handler(CommandHandler("screen", self._cmd_snap))
+        self.app.add_handler(CommandHandler("screenshot", self._cmd_snap))
         self.app.add_handler(CommandHandler("alarm", self._cmd_alarm))
         self.app.add_handler(CommandHandler("ping", self._cmd_alarm))
+        self.app.add_handler(CommandHandler("strobe", self._cmd_strobe))
+        self.app.add_handler(CommandHandler("flash", self._cmd_strobe))
+        self.app.add_handler(CommandHandler("open", self._cmd_open))
+        self.app.add_handler(CommandHandler("lock", self._cmd_lock))
         self.app.add_handler(CommandHandler("focus", self._cmd_focus))
         self.app.add_handler(CommandHandler("feed", self._cmd_feed))
         self.app.add_handler(CommandHandler("poke", self._cmd_poke))
@@ -89,6 +104,9 @@ class TelegramBotWorker(QThread):
         # Callbacks & Polls
         self.app.add_handler(CallbackQueryHandler(self._handle_callback))
         self.app.add_handler(PollAnswerHandler(self._handle_poll_answer))
+
+        # Natural language processor for free-form conversation & commands
+        self.app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_natural_language))
 
         await self.app.initialize()
         await self.app.start()
@@ -248,15 +266,19 @@ class TelegramBotWorker(QThread):
 
         keyboard = [
             [
-                InlineKeyboardButton("📸 Desktop Snap", callback_data="btn_snap"),
-                InlineKeyboardButton("🧠 Quick Quiz", callback_data="btn_quiz"),
-            ],
-            [
+                InlineKeyboardButton("📸 Desktop Screenshot", callback_data="btn_snap"),
                 InlineKeyboardButton("🚨 Desk Alarm", callback_data="btn_alarm"),
-                InlineKeyboardButton("🥩 Feed Pet", callback_data="btn_feed"),
             ],
             [
-                InlineKeyboardButton("💻 Daily LeetCode", callback_data="btn_leetcode"),
+                InlineKeyboardButton("🐾 Show Pet", callback_data="btn_show_pet"),
+                InlineKeyboardButton("🙈 Hide Pet", callback_data="btn_hide_pet"),
+            ],
+            [
+                InlineKeyboardButton("🥩 Feed Pet", callback_data="btn_feed"),
+                InlineKeyboardButton("💻 Open LeetCode", callback_data="btn_open_leetcode"),
+            ],
+            [
+                InlineKeyboardButton("🧠 Quick Quiz", callback_data="btn_quiz"),
                 InlineKeyboardButton("🔥 Roast Me", callback_data="btn_roast"),
             ],
         ]
@@ -264,33 +286,92 @@ class TelegramBotWorker(QThread):
             "🐾 *Tomogachi Awaken Companion is Online!*\n\n"
             f"✅ Linked to Chat ID: `{chat_id}`\n\n"
             "Your autonomous desktop companion & placement accountability sentinel.\n\n"
-            "*Available Commands:*\n"
-            "• `/snap` — Live desktop snapshot (window, CPU, battery, Git, pet mood)\n"
-            "• `/alarm` — Remotely trigger sound, voice & pet alarm on your laptop\n"
-            "• `/focus <mins>` — Start a Pomodoro deep work sprint (e.g. `/focus 25`)\n"
-            "• `/feed` / `/poke` — Interact directly with your desktop pet\n"
-            "• `/boss` — Sudden Death Boss Fight: 3 rapid-fire placement questions\n"
-            "• `/quiz` — Solve placement MCQs to *heal and feed your pet*\n"
-            "• `/leetcode` — Daily curated placement coding challenge\n"
-            "• `/roast` — Contextual reality check based on active window\n"
-            "• `/stats` — Accuracy, answer streaks, focus stats\n"
+            "*Available Controls:*\n"
+            "• `/show` & `/hide` — Summon or dismiss the desktop pet\n"
+            "• `/snap` or `/screen` — Send a live desktop screenshot photo\n"
+            "• `/alarm` — Force loud desk siren, screen flash & SAPI voice\n"
+            "• `/strobe` — Flash red neon alert border on laptop screen\n"
+            "• `/open <leetcode|github>` — Pop open study sites on laptop\n"
+            "• `/lock` — Remotely lock Windows workstation\n"
+            "• `/feed` / `/poke` — Interact with your desktop pet\n"
+            "• `/pet say <text>` — Make pet speak text on desktop\n"
+            "• `/quiz` / `/leetcode` — Placement DSA coding challenges\n"
+            "• `/focus <mins>` — Start Pomodoro deep work sprint\n"
             "• `/sound <on|off>` — Toggle laptop voice alerts\n"
-            "• `/snooze <mins>` — Pause alerts (e.g. `/snooze 30`)"
+            "• `/snooze <mins>` — Pause alerts\n\n"
+            "💡 _Tip: You can also just type in plain English (e.g. 'show pet', 'take screenshot', 'wake me up', 'open leetcode')!_"
         )
         await update.message.reply_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
 
     async def _cmd_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         await self._cmd_start(update, context)
 
+    async def _cmd_show_pet(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        self.pet_action.emit("pet:show")
+        await update.message.reply_text("🐾 *Desktop Pet Summoned!* It is now active on your screen.", parse_mode="Markdown")
+
+    async def _cmd_hide_pet(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        self.pet_action.emit("pet:hide")
+        await update.message.reply_text("🐾 *Desktop Pet Dismissed!* Running silently in the background.", parse_mode="Markdown")
+
+    async def _cmd_open(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        target = context.args[0] if context.args else "leetcode"
+        self.pet_action.emit(f"open:{target}")
+        await update.message.reply_text(f"🚀 *Opened `{target}` on your laptop browser!*", parse_mode="Markdown")
+
+    async def _cmd_lock(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        self.pet_action.emit("lock")
+        await update.message.reply_text("🔒 *Workstation Locked!* Windows session has been locked.", parse_mode="Markdown")
+
+    async def _cmd_strobe(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        self.pet_action.emit("strobe")
+        await update.message.reply_text("🚨 *Screen Alert Strobe Triggered!* Pulsing red alert border on laptop monitor.", parse_mode="Markdown")
+
     async def _cmd_pet(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if context.args:
+            sub = context.args[0].lower()
+            if sub in ("show", "unhide", "summon"):
+                self.pet_action.emit("pet:show")
+                await update.message.reply_text("🐾 *Desktop pet is now visible on your screen!*", parse_mode="Markdown")
+                return
+            elif sub in ("hide", "dismiss", "close"):
+                self.pet_action.emit("pet:hide")
+                await update.message.reply_text("🐾 *Desktop pet dismissed to background.*", parse_mode="Markdown")
+                return
+            elif sub == "say":
+                phrase = " ".join(context.args[1:]) if len(context.args) > 1 else "Hello!"
+                self.pet_action.emit(f"pet:say:{phrase}")
+                await update.message.reply_text(f"🐾 *Pet displayed speech bubble:* \"{phrase}\"", parse_mode="Markdown")
+                return
+            elif sub in ("feed", "treat"):
+                await self._cmd_feed(update, context)
+                return
+            elif sub in ("poke", "prod"):
+                await self._cmd_poke(update, context)
+                return
+            elif sub in ("dance", "jump"):
+                self.pet_action.emit("dance")
+                await update.message.reply_text("🐾 *Pet is dancing!*", parse_mode="Markdown")
+                return
+            elif sub == "alarm":
+                await self._cmd_alarm(update, context)
+                return
+
         msg = self._build_pet_status_text()
         keyboard = [
             [
-                InlineKeyboardButton("🥩 Feed with Quiz", callback_data="btn_quiz"),
-                InlineKeyboardButton("📸 Full Snap", callback_data="btn_snap"),
+                InlineKeyboardButton("🐾 Show Pet", callback_data="btn_show_pet"),
+                InlineKeyboardButton("🙈 Hide Pet", callback_data="btn_hide_pet"),
             ],
             [
+                InlineKeyboardButton("📸 Desktop Screenshot", callback_data="btn_snap"),
                 InlineKeyboardButton("🚨 Desk Alarm", callback_data="btn_alarm"),
+            ],
+            [
+                InlineKeyboardButton("🥩 Feed Pet", callback_data="btn_feed"),
+                InlineKeyboardButton("💻 Open LeetCode", callback_data="btn_open_leetcode"),
+            ],
+            [
                 InlineKeyboardButton("🔄 Refresh", callback_data="btn_pet_status"),
             ]
         ]
@@ -332,17 +413,48 @@ class TelegramBotWorker(QThread):
                 InlineKeyboardButton("🚨 Desk Alarm", callback_data="btn_alarm"),
             ],
             [
+                InlineKeyboardButton("🐾 Show Pet", callback_data="btn_show_pet"),
+                InlineKeyboardButton("🙈 Hide Pet", callback_data="btn_hide_pet"),
+            ],
+            [
                 InlineKeyboardButton("🥩 Feed Pet", callback_data="btn_feed"),
-                InlineKeyboardButton("🧠 Quick Quiz", callback_data="btn_quiz"),
+                InlineKeyboardButton("💻 Open LeetCode", callback_data="btn_open_leetcode"),
             ]
         ]
-        await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
+
+        img_bytes = None
+        if self.screenshot_getter and callable(self.screenshot_getter):
+            try:
+                img_bytes = self.screenshot_getter()
+            except Exception as e:
+                logger.error(f"Error capturing screenshot: {e}")
+
+        # Support both Update and CallbackQuery
+        target_message = update.message if hasattr(update, 'message') and update.message else getattr(update, 'callback_query', update)
+        if hasattr(target_message, 'message') and target_message.message:
+            target_message = target_message.message
+
+        if img_bytes:
+            await target_message.reply_photo(
+                photo=io.BytesIO(img_bytes),
+                caption=msg,
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+        else:
+            await target_message.reply_text(
+                msg,
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
 
     async def _cmd_alarm(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         self.pet_action.emit("alarm")
         await update.message.reply_text(
             "🚨 *DESK ALARM TRIGGERED!* 🔊\n\n"
-            "Your desktop pet is jumping, knocking on screen, and sounding voice alerts on your laptop!",
+            "• Desktop pet is knocking and alert siren is sounding!\n"
+            "• Monitor screen border is strobing red neon!\n"
+            "• SAPI Voice alert speaking attention warning on laptop!",
             parse_mode="Markdown"
         )
 
@@ -460,6 +572,15 @@ class TelegramBotWorker(QThread):
             await query.message.reply_text(self._build_pet_status_text(), parse_mode="Markdown")
         elif data == "btn_snap":
             await self._cmd_snap(query, context)
+        elif data == "btn_show_pet":
+            self.pet_action.emit("pet:show")
+            await query.message.reply_text("🐾 *Desktop pet summoned to screen!*", parse_mode="Markdown")
+        elif data == "btn_hide_pet":
+            self.pet_action.emit("pet:hide")
+            await query.message.reply_text("🐾 *Desktop pet hidden.* Running silently in background.", parse_mode="Markdown")
+        elif data == "btn_open_leetcode":
+            self.pet_action.emit("open:leetcode")
+            await query.message.reply_text("🚀 *Launched LeetCode in your laptop browser!*", parse_mode="Markdown")
         elif data == "btn_alarm":
             self.pet_action.emit("alarm")
             await query.message.reply_text("🚨 *Desk Alarm Triggered!*", parse_mode="Markdown")
@@ -560,4 +681,115 @@ class TelegramBotWorker(QThread):
             f"• *Focus Streak:* {streak}\n"
             f"• *Active AI Agents:* `{agents}`\n"
             f"• *Quiz Accuracy:* {self.quiz_manager.stats.get('streak', 0)} correct in a row"
+        )
+
+    async def _handle_natural_language(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Processes plain-text conversational intent matching for seamless remote control."""
+        if not update.message or not update.message.text:
+            return
+
+        text = update.message.text.strip()
+        lower = text.lower()
+        chat_id = str(update.effective_chat.id)
+
+        # 1. Pet Visibility Controls
+        if any(p in lower for p in ["show pet", "summon pet", "bring out", "where is pet", "where's my pet", "come here", "open pet", "unhide pet"]):
+            self.pet_action.emit("pet:show")
+            await update.message.reply_text("🐾 *Desktop Pet Summoned!* It is now active on your screen. Type 'hide pet' anytime to dismiss it.", parse_mode="Markdown")
+            return
+
+        if any(p in lower for p in ["hide pet", "dismiss pet", "dismiss", "go away", "bye pet", "close pet", "leave me alone"]):
+            self.pet_action.emit("pet:hide")
+            await update.message.reply_text("🐾 *Desktop Pet Dismissed!* Running silently in the background.", parse_mode="Markdown")
+            return
+
+        # 2. Pet Speech / Dialogue
+        if lower.startswith("say ") or lower.startswith("tell him ") or lower.startswith("pet say "):
+            msg = text.split(" ", 1)[1] if " " in text else "Hello!"
+            self.pet_action.emit(f"pet:say:{msg}")
+            await update.message.reply_text(f"🐾 Pet will display on desktop: *\"{msg}\"*", parse_mode="Markdown")
+            return
+
+        # 3. Screenshot / Live Desktop View
+        if any(w in lower for w in ["screenshot", "screen", "what's on my screen", "what is on my screen", "snap", "desktop photo"]):
+            await self._cmd_snap(update, context)
+            return
+
+        # 4. Alarms & Wake-up Calls
+        if any(w in lower for w in ["alarm", "wake me up", "make noise", "ring", "buzz", "bell", "loud"]):
+            await self._cmd_alarm(update, context)
+            return
+
+        # 5. Visual Flash / Screen Strobe
+        if any(w in lower for w in ["flash", "strobe", "blink screen"]):
+            self.pet_action.emit("strobe")
+            await update.message.reply_text("🚨 *Screen Alert Strobe Triggered!* Pulsing red neon alert border on laptop monitor.", parse_mode="Markdown")
+            return
+
+        # 6. Lock Workstation
+        if any(w in lower for w in ["lock pc", "lock laptop", "lock screen", "lock workstation"]):
+            self.pet_action.emit("lock")
+            await update.message.reply_text("🔒 *Laptop Screen Locked!* Windows workstation locked.", parse_mode="Markdown")
+            return
+
+        # 7. Browser Launchers
+        if "open leetcode" in lower or lower == "leetcode":
+            self.pet_action.emit("open:leetcode")
+            await update.message.reply_text("🚀 *Launched LeetCode on your laptop browser!* Time to grind.", parse_mode="Markdown")
+            return
+
+        if "open github" in lower or lower == "github":
+            self.pet_action.emit("open:github")
+            await update.message.reply_text("🌿 *Launched GitHub on your laptop browser!*", parse_mode="Markdown")
+            return
+
+        # 8. Feed / Pet / Poke
+        if any(w in lower for w in ["feed", "snack", "treat", "give food"]):
+            await self._cmd_feed(update, context)
+            return
+
+        if any(w in lower for w in ["poke", "wake up"]):
+            await self._cmd_poke(update, context)
+            return
+
+        if any(w in lower for w in ["dance", "jump", "play"]):
+            self.pet_action.emit("dance")
+            await update.message.reply_text("🐾 *Pet is dancing happily!*", parse_mode="Markdown")
+            return
+
+        # 9. Status & Metrics
+        if any(w in lower for w in ["status", "how am i doing", "stats", "today", "streak", "battery"]):
+            await self._cmd_pet(update, context)
+            return
+
+        # 10. Reality Check / Roast
+        if any(w in lower for w in ["roast", "am i slacking", "be honest", "truth"]):
+            await self._cmd_roast(update, context)
+            return
+
+        # 11. Quiz / Question
+        if any(w in lower for w in ["quiz", "question", "dsa", "mcq", "test me"]):
+            await self.send_quiz(chat_id=chat_id)
+            return
+
+        # Default intelligent response with quick actions
+        keyboard = [
+            [
+                InlineKeyboardButton("🐾 Show Pet", callback_data="btn_show_pet"),
+                InlineKeyboardButton("🙈 Hide Pet", callback_data="btn_hide_pet"),
+            ],
+            [
+                InlineKeyboardButton("📸 Desktop Screenshot", callback_data="btn_snap"),
+                InlineKeyboardButton("🚨 Desk Alarm", callback_data="btn_alarm"),
+            ],
+            [
+                InlineKeyboardButton("💻 Open LeetCode", callback_data="btn_open_leetcode"),
+                InlineKeyboardButton("🔥 Roast Me", callback_data="btn_roast"),
+            ]
+        ]
+        await update.message.reply_text(
+            f"🤖 *Tomogachi Sentinel received:* \"{text}\"\n\n"
+            "I'm continuously monitoring your desktop in the background. What would you like me to do?",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard)
         )

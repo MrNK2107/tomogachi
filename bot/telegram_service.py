@@ -11,6 +11,8 @@ from telegram.ext import (
     CommandHandler,
     CallbackQueryHandler,
     PollAnswerHandler,
+    MessageHandler,
+    filters,
     ContextTypes,
 )
 
@@ -57,11 +59,18 @@ class TelegramService:
         self.app.add_handler(CommandHandler("start", self._cmd_start))
         self.app.add_handler(CommandHandler("help", self._cmd_help))
         self.app.add_handler(CommandHandler("status", self._cmd_status))
-        self.app.add_handler(CommandHandler("pet", self._cmd_status))
+        self.app.add_handler(CommandHandler("pet", self._cmd_pet))
+        self.app.add_handler(CommandHandler("show", self._cmd_show_pet))
+        self.app.add_handler(CommandHandler("hide", self._cmd_hide_pet))
         self.app.add_handler(CommandHandler("snap", self._cmd_snap))
         self.app.add_handler(CommandHandler("screen", self._cmd_snap))
+        self.app.add_handler(CommandHandler("screenshot", self._cmd_snap))
         self.app.add_handler(CommandHandler("alarm", self._cmd_alarm))
         self.app.add_handler(CommandHandler("ping", self._cmd_alarm))
+        self.app.add_handler(CommandHandler("strobe", self._cmd_strobe))
+        self.app.add_handler(CommandHandler("flash", self._cmd_strobe))
+        self.app.add_handler(CommandHandler("open", self._cmd_open))
+        self.app.add_handler(CommandHandler("lock", self._cmd_lock))
         self.app.add_handler(CommandHandler("focus", self._cmd_focus))
         self.app.add_handler(CommandHandler("feed", self._cmd_feed))
         self.app.add_handler(CommandHandler("poke", self._cmd_poke))
@@ -77,6 +86,9 @@ class TelegramService:
         # Interactive callbacks and quiz poll answers
         self.app.add_handler(CallbackQueryHandler(self._handle_callback))
         self.app.add_handler(PollAnswerHandler(self._handle_poll_answer))
+
+        # Natural language processor
+        self.app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_natural_language))
 
         return self.app
 
@@ -274,16 +286,77 @@ class TelegramService:
                 InlineKeyboardButton("🚨 Desk Alarm", callback_data="btn_alarm"),
             ],
             [
+                InlineKeyboardButton("🐾 Show Pet", callback_data="btn_show_pet"),
+                InlineKeyboardButton("🙈 Hide Pet", callback_data="btn_hide_pet"),
+            ],
+            [
                 InlineKeyboardButton("🥩 Feed Pet", callback_data="btn_feed"),
-                InlineKeyboardButton("🧠 Quick Quiz", callback_data="btn_quiz"),
+                InlineKeyboardButton("💻 Open LeetCode", callback_data="btn_open_leetcode"),
             ]
         ]
         await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
 
+    async def _cmd_show_pet(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if self.heartbeat_storage:
+            self.heartbeat_storage.queue_action("pet:show")
+        await update.message.reply_text("🐾 *Desktop Pet Summoned!* Queued for your desktop screen.", parse_mode="Markdown")
+
+    async def _cmd_hide_pet(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if self.heartbeat_storage:
+            self.heartbeat_storage.queue_action("pet:hide")
+        await update.message.reply_text("🐾 *Desktop Pet Dismissed!* Running silently in background.", parse_mode="Markdown")
+
+    async def _cmd_open(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        target = context.args[0] if context.args else "leetcode"
+        if self.heartbeat_storage:
+            self.heartbeat_storage.queue_action(f"open:{target}")
+        await update.message.reply_text(f"🚀 *Opened `{target}` on your laptop browser!*", parse_mode="Markdown")
+
+    async def _cmd_lock(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if self.heartbeat_storage:
+            self.heartbeat_storage.queue_action("lock")
+        await update.message.reply_text("🔒 *Workstation Lock Dispatched!* Your Windows laptop will lock.", parse_mode="Markdown")
+
+    async def _cmd_strobe(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if self.heartbeat_storage:
+            self.heartbeat_storage.queue_action("strobe")
+        await update.message.reply_text("🚨 *Screen Alert Strobe Dispatched!*", parse_mode="Markdown")
+
+    async def _cmd_pet(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if context.args:
+            sub = context.args[0].lower()
+            if sub in ("show", "unhide", "summon"):
+                await self._cmd_show_pet(update, context)
+                return
+            elif sub in ("hide", "dismiss", "close"):
+                await self._cmd_hide_pet(update, context)
+                return
+            elif sub == "say":
+                phrase = " ".join(context.args[1:]) if len(context.args) > 1 else "Hello!"
+                if self.heartbeat_storage:
+                    self.heartbeat_storage.queue_action(f"pet:say:{phrase}")
+                await update.message.reply_text(f"🐾 *Pet speech bubble dispatched:* \"{phrase}\"", parse_mode="Markdown")
+                return
+            elif sub in ("feed", "treat"):
+                await self._cmd_feed(update, context)
+                return
+            elif sub in ("poke", "prod"):
+                await self._cmd_poke(update, context)
+                return
+            elif sub in ("dance", "jump"):
+                if self.heartbeat_storage:
+                    self.heartbeat_storage.queue_action("dance")
+                await update.message.reply_text("🐾 *Pet dance dispatched!*", parse_mode="Markdown")
+                return
+            elif sub == "alarm":
+                await self._cmd_alarm(update, context)
+                return
+        await self._cmd_snap(update, context)
+
     async def _cmd_alarm(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if self.heartbeat_storage:
             self.heartbeat_storage.queue_action("alarm")
-        await update.message.reply_text("🚨 *DESK ALARM DISPATCHED!* Your laptop will sound voice & audio alerts!", parse_mode="Markdown")
+        await update.message.reply_text("🚨 *DESK ALARM DISPATCHED!* Your laptop will sound siren & voice alerts, and flash monitor borders!", parse_mode="Markdown")
 
     async def _cmd_focus(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         mins = 25
@@ -379,6 +452,14 @@ class TelegramService:
 
         if data in ("btn_status", "btn_pet_status", "btn_snap"):
             await self._cmd_snap(query, context)
+        elif data == "btn_show_pet":
+            await self._cmd_show_pet(query, context)
+        elif data == "btn_hide_pet":
+            await self._cmd_hide_pet(query, context)
+        elif data == "btn_open_leetcode":
+            if self.heartbeat_storage:
+                self.heartbeat_storage.queue_action("open:leetcode")
+            await query.message.reply_text("🚀 *Launched LeetCode on your laptop browser!*", parse_mode="Markdown")
         elif data == "btn_alarm":
             await self._cmd_alarm(query, context)
         elif data == "btn_feed":
@@ -401,6 +482,117 @@ class TelegramService:
                 "🏃 Awesome! Head back to the desk and let's get into the flow zone 💻🔥",
                 parse_mode="Markdown",
             )
+
+    async def _handle_natural_language(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Processes plain-text conversational intent matching for seamless remote control."""
+        if not update.message or not update.message.text:
+            return
+
+        text = update.message.text.strip()
+        lower = text.lower()
+        chat_id = str(update.effective_chat.id)
+
+        # 1. Pet Visibility Controls
+        if any(p in lower for p in ["show pet", "summon pet", "bring out", "where is pet", "where's my pet", "come here", "open pet", "unhide pet"]):
+            await self._cmd_show_pet(update, context)
+            return
+
+        if any(p in lower for p in ["hide pet", "dismiss pet", "dismiss", "go away", "bye pet", "close pet", "leave me alone"]):
+            await self._cmd_hide_pet(update, context)
+            return
+
+        # 2. Pet Speech / Dialogue
+        if lower.startswith("say ") or lower.startswith("tell him ") or lower.startswith("pet say "):
+            msg = text.split(" ", 1)[1] if " " in text else "Hello!"
+            if self.heartbeat_storage:
+                self.heartbeat_storage.queue_action(f"pet:say:{msg}")
+            await update.message.reply_text(f"🐾 Pet will display on desktop: *\"{msg}\"*", parse_mode="Markdown")
+            return
+
+        # 3. Screenshot / Live Desktop View
+        if any(w in lower for w in ["screenshot", "screen", "what's on my screen", "what is on my screen", "snap", "desktop photo"]):
+            await self._cmd_snap(update, context)
+            return
+
+        # 4. Alarms & Wake-up Calls
+        if any(w in lower for w in ["alarm", "wake me up", "make noise", "ring", "buzz", "bell", "loud"]):
+            await self._cmd_alarm(update, context)
+            return
+
+        # 5. Visual Flash / Screen Strobe
+        if any(w in lower for w in ["flash", "strobe", "blink screen"]):
+            await self._cmd_strobe(update, context)
+            return
+
+        # 6. Lock Workstation
+        if any(w in lower for w in ["lock pc", "lock laptop", "lock screen", "lock workstation"]):
+            await self._cmd_lock(update, context)
+            return
+
+        # 7. Browser Launchers
+        if "open leetcode" in lower or lower == "leetcode":
+            if self.heartbeat_storage:
+                self.heartbeat_storage.queue_action("open:leetcode")
+            await update.message.reply_text("🚀 *Launched LeetCode on your laptop browser!* Time to grind.", parse_mode="Markdown")
+            return
+
+        if "open github" in lower or lower == "github":
+            if self.heartbeat_storage:
+                self.heartbeat_storage.queue_action("open:github")
+            await update.message.reply_text("🌿 *Launched GitHub on your laptop browser!*", parse_mode="Markdown")
+            return
+
+        # 8. Feed / Pet / Poke
+        if any(w in lower for w in ["feed", "snack", "treat", "give food"]):
+            await self._cmd_feed(update, context)
+            return
+
+        if any(w in lower for w in ["poke", "wake up"]):
+            await self._cmd_poke(update, context)
+            return
+
+        if any(w in lower for w in ["dance", "jump", "play"]):
+            if self.heartbeat_storage:
+                self.heartbeat_storage.queue_action("dance")
+            await update.message.reply_text("🐾 *Pet is dancing happily!*", parse_mode="Markdown")
+            return
+
+        # 9. Status & Metrics
+        if any(w in lower for w in ["status", "how am i doing", "stats", "today", "streak", "battery"]):
+            await self._cmd_snap(update, context)
+            return
+
+        # 10. Reality Check / Roast
+        if any(w in lower for w in ["roast", "am i slacking", "be honest", "truth"]):
+            await self._cmd_roast(update, context)
+            return
+
+        # 11. Quiz / Question
+        if any(w in lower for w in ["quiz", "question", "dsa", "mcq", "test me"]):
+            await self.send_quiz(chat_id=chat_id)
+            return
+
+        # Default intelligent response with quick actions
+        keyboard = [
+            [
+                InlineKeyboardButton("🐾 Show Pet", callback_data="btn_show_pet"),
+                InlineKeyboardButton("🙈 Hide Pet", callback_data="btn_hide_pet"),
+            ],
+            [
+                InlineKeyboardButton("📸 Desktop Snapshot", callback_data="btn_snap"),
+                InlineKeyboardButton("🚨 Desk Alarm", callback_data="btn_alarm"),
+            ],
+            [
+                InlineKeyboardButton("💻 Open LeetCode", callback_data="btn_open_leetcode"),
+                InlineKeyboardButton("🔥 Roast Me", callback_data="btn_roast"),
+            ]
+        ]
+        await update.message.reply_text(
+            f"🤖 *Awaken Cloud Sentinel received:* \"{text}\"\n\n"
+            "I'm continuously monitoring your desktop from the cloud. What would you like to do?",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
 
     async def _handle_poll_answer(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE

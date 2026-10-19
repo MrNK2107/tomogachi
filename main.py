@@ -163,6 +163,7 @@ class SettingsPanel(QWidget):
             self.telegram_worker.quiz_solved.connect(self.on_quiz_solved)
             self.telegram_worker.pet_action.connect(self.on_pet_action)
             self.telegram_worker.set_pet_state_getter(self.get_live_pet_state)
+            self.telegram_worker.set_screenshot_getter(self.capture_desktop_screenshot)
 
         self.setWindowTitle("Desktop Focus Pet - Control Dashboard")
         self.setFixedSize(500, 960)
@@ -903,19 +904,60 @@ class SettingsPanel(QWidget):
     def on_pet_action(self, action: str):
         """Handles remote action commands sent from phone via Telegram or Cloud Heartbeat."""
         action = str(action).strip()
-        if action == "alarm":
+        if action == "pet:show":
+            self.pet_window.show_pet()
+            if hasattr(self, 'tray_icon') and self.tray_icon:
+                self.tray_icon.showMessage("🐾 Pet Summoned", "Desktop pet is now active on your screen.", QSystemTrayIcon.MessageIcon.Information, 2000)
+        elif action == "pet:hide":
+            self.pet_window.hide_pet()
+            if hasattr(self, 'tray_icon') and self.tray_icon:
+                self.tray_icon.showMessage("🐾 Pet Dismissed", "Desktop pet dismissed to background.", QSystemTrayIcon.MessageIcon.Information, 2000)
+        elif action.startswith("pet:say:"):
+            phrase = action.split("pet:say:", 1)[1]
+            self.pet_window.show()
+            self.pet_window.show_custom_bubble(phrase, 150)
+            self.voice_alert.speak(phrase, force=True)
+        elif action == "dance":
+            self.pet_window.show()
+            self.pet_window.trigger_pet_reaction()
+            self.voice_alert.play_tone("happy")
+        elif action == "strobe":
+            self.screen_overlay.trigger_strobe_alert(duration_sec=3.5, color="#ff0844")
+            self.voice_alert.play_tone("warning")
+        elif action.startswith("open:"):
+            target = action.split("open:", 1)[1].lower()
+            import webbrowser
+            if target == "leetcode":
+                webbrowser.open("https://leetcode.com/problemset/")
+            elif target == "github":
+                webbrowser.open("https://github.com")
+            elif target.startswith("http"):
+                webbrowser.open(target)
+            else:
+                webbrowser.open(f"https://{target}")
+        elif action == "lock":
+            import ctypes
+            if sys.platform == "win32":
+                try:
+                    ctypes.windll.user32.LockWorkStation()
+                except Exception:
+                    pass
+        elif action == "alarm":
+            self.pet_window.show()
             self.pet_window.trigger_alarm_animation()
-            self.voice_alert.play_tone("alarm")
-            self.voice_alert.speak("Attention! Wake up and focus on your work!")
+            self.screen_overlay.trigger_strobe_alert(duration_sec=4.0, color="#ff0844")
+            self.voice_alert.play_tone("siren", force=True)
+            self.voice_alert.speak("Attention! Wake up and focus on your work!", force=True)
             if hasattr(self, 'tray_icon') and self.tray_icon:
                 self.tray_icon.showMessage(
-                    "🚨 Desk Alarm Triggered via Phone!",
-                    "Telegram companion sounded desk alarm!",
-                    QSystemTrayIcon.MessageIcon.Warning,
-                    4000
+                    "🚨 DESK ALARM TRIGGERED VIA PHONE!",
+                    "Telegram companion sounded desk siren and screen alert!",
+                    QSystemTrayIcon.MessageIcon.Critical,
+                    6000
                 )
         elif action == "feed":
             self.engine.heal_focus(20.0)
+            self.pet_window.show()
             self.pet_window.trigger_feed_animation()
             self.voice_alert.play_tone("happy")
             if hasattr(self, 'tray_icon') and self.tray_icon:
@@ -926,21 +968,25 @@ class SettingsPanel(QWidget):
                     2500
                 )
         elif action == "poke":
+            self.pet_window.show()
             self.pet_window.trigger_poke_animation()
             self.voice_alert.play_tone("warning")
         elif action.startswith("focus:"):
             try:
                 val = float(action.split(":", 1)[1])
                 self.engine.heal_focus(val)
+                self.pet_window.show()
                 self.pet_window.show_custom_bubble(f"Focus Sprint +{int(val)}m! ✨", 120)
                 self.voice_alert.play_tone("happy")
             except Exception:
                 pass
         elif action == "boss":
             self.engine.distraction_score = 100.0
+            self.pet_window.show()
             self.pet_window.show_custom_bubble("🚨 BOSS APPROACHING! 🚨", 150)
             self.pet_window.set_level(3)
-            self.voice_alert.speak("Boss mode activated. Focus immediately.")
+            self.screen_overlay.trigger_strobe_alert(duration_sec=3.0, color="#ff0844")
+            self.voice_alert.speak("Boss mode activated. Focus immediately.", force=True)
         elif action == "sound:off":
             self.voice_alert.enabled = False
             self.pet_window.show_custom_bubble("🔇 Audio Muted", 80)
@@ -948,6 +994,25 @@ class SettingsPanel(QWidget):
             self.voice_alert.enabled = True
             self.pet_window.show_custom_bubble("🔊 Audio Enabled", 80)
             self.voice_alert.play_tone("happy")
+
+    def capture_desktop_screenshot(self) -> bytes:
+        """Captures the current desktop screen and returns JPEG image bytes."""
+        try:
+            screen = QGuiApplication.primaryScreen()
+            if not screen:
+                return b""
+            pix = screen.grabWindow(0)
+            if pix.isNull():
+                return b""
+            if pix.width() > 1280:
+                pix = pix.scaledToWidth(1280, Qt.TransformationMode.SmoothTransformation)
+            from PyQt6.QtCore import QBuffer, QIODevice
+            buf = QBuffer()
+            buf.open(QIODevice.OpenModeFlag.ReadWrite)
+            pix.save(buf, "JPEG", 82)
+            return bytes(buf.data().data())
+        except Exception as e:
+            return b""
 
     def get_live_pet_state(self) -> dict:
         """Returns live pet telemetry for Telegram companion bot and cloud heartbeat."""
@@ -1323,7 +1388,11 @@ def main():
     screen_overlay.show()
     
     pet_window = PetWindow(screen_overlay=screen_overlay)
-    pet_window.show()
+    # Pet starts hidden by default; user summons it on-demand via Telegram bot
+    if "--show-pet" in sys.argv:
+        pet_window.show()
+    else:
+        pet_window.hide()
     
     # Initialize background Worker Threads
     cv_worker = CVTrackerWorker(camera_index=0)
@@ -1415,19 +1484,12 @@ def main():
             pet_window.notify_typing_detected()
     activity_worker.activity_update.connect(on_typing_for_pet)
 
-    # Check for --daemon or --minimized command line flag
-    daemon_mode = "--daemon" in sys.argv or "--minimized" in sys.argv
-    if not daemon_mode:
+    # Dashboard GUI is hidden by default; sentinel runs purely in background
+    open_gui = "--gui" in sys.argv or "--open-dashboard" in sys.argv
+    if open_gui:
         settings_panel.show_and_activate()
     else:
         settings_panel.hide()
-        if hasattr(settings_panel, 'tray_icon'):
-            settings_panel.tray_icon.showMessage(
-                "Desktop Focus Pet",
-                "Running as background daemon. Click your desktop pet or tray icon to open dashboard.",
-                QSystemTrayIcon.MessageIcon.Information,
-                3000
-            )
     
     sys.exit(app.exec())
 

@@ -19,12 +19,12 @@ class VoiceAlert:
         self._speech_lock = threading.Lock()
         self._is_speaking = False
 
-    def speak(self, phrase: str):
+    def speak(self, phrase: str, force: bool = False):
         """Speaks phrase asynchronously via Windows Text-to-Speech (SAPI)."""
         if not self.enabled or sys.platform != "win32":
             return
-        if audio_guard.is_audio_silent_mode():
-            # Respect silent/speaker mode constraints
+        if not force and audio_guard.is_audio_silent_mode():
+            # Respect silent/speaker mode constraints unless forced
             return
 
         def _worker():
@@ -35,9 +35,8 @@ class VoiceAlert:
 
                     pythoncom.CoInitialize()
                     speaker = win32com.client.Dispatch("SAPI.SpVoice")
-                    # Set moderate rate and volume
                     speaker.Rate = 1
-                    speaker.Volume = 85
+                    speaker.Volume = 95 if force else 85
                     speaker.Speak(phrase)
                 except Exception as e:
                     logger.debug(f"Voice alert exception: {e}")
@@ -49,25 +48,33 @@ class VoiceAlert:
 
         threading.Thread(target=_worker, daemon=True).start()
 
-    def play_tone(self, tone_type: str = "alert"):
-        """Plays distinctive procedural chime."""
+    def play_tone(self, tone_type: str = "alert", force: bool = False):
+        """Plays distinctive procedural chime or siren."""
         if not self.enabled:
             return
 
         def _worker():
             try:
-                if tone_type == "alarm":
-                    for freq in (880.0, 1100.0, 880.0, 1100.0):
-                        audio_guard.play_alert_tone(frequency=freq, duration=0.12, volume=0.25)
+                # System audio chime fallback
+                if sys.platform == "win32" and force:
+                    try:
+                        import ctypes
+                        ctypes.windll.user32.MessageBeep(0x00000010)  # MB_ICONHAND / system critical alert
+                    except Exception:
+                        pass
+
+                if tone_type in ("alarm", "siren"):
+                    for freq in (700.0, 950.0, 1200.0, 950.0, 1200.0, 700.0):
+                        audio_guard.play_alert_tone(frequency=freq, duration=0.10, volume=0.35)
                         import time
-                        time.sleep(0.12)
+                        time.sleep(0.10)
                 elif tone_type == "happy":
                     for freq in (523.25, 659.25, 783.99, 1046.50):  # C Major Arpeggio
                         audio_guard.play_alert_tone(frequency=freq, duration=0.08, volume=0.2)
                         import time
                         time.sleep(0.08)
                 elif tone_type == "warning":
-                    audio_guard.play_alert_tone(frequency=440.0, duration=0.2, volume=0.2)
+                    audio_guard.play_alert_tone(frequency=440.0, duration=0.25, volume=0.25)
                 else:  # default alert
                     audio_guard.play_alert_tone(frequency=880.0, duration=0.15, volume=0.2)
             except Exception:

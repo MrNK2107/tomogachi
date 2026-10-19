@@ -7,7 +7,8 @@ APP_NAME = "DesktopFocusPet"
 CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
 
 DEFAULT_CONFIG = {
-    "autostart": False,
+    "autostart": True,
+    "start_pet_hidden": True,
     "pet_type": "CAT",  # "CAT", "DRAGON", "BOT", "BLOB", "PANDA", "CUSTOM"
     "theme_name": "Tokyo Night",  # "Tokyo Night", "Dracula", "Catppuccin", "One Dark Pro"
     "custom_image_path": "",
@@ -57,17 +58,29 @@ def get_launch_command() -> str:
             
     return f'"{python_exe}" "{run_script}" --daemon'
 
+def get_startup_vbs_path() -> str:
+    """Returns path to Startup folder VBScript launcher."""
+    appdata = os.environ.get("APPDATA", "")
+    if appdata:
+        return os.path.join(appdata, r"Microsoft\Windows\Start Menu\Programs\Startup\DesktopFocusPet.vbs")
+    return ""
 
 def set_windows_autostart(enable: bool) -> bool:
     """
-    Configures Windows registry HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run 
-    to launch Desktop Focus Pet on startup.
-    Returns True if successfully set/removed, False otherwise.
+    Configures Windows registry and Startup folder VBScript
+    to launch Tomogachi Sentinel invisibly on Windows login.
     """
     if sys.platform != "win32":
-        print("[ConfigManager] Autostart registry key is only applicable on Windows.")
         return False
 
+    success = True
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    run_script = os.path.join(base_dir, "run.py")
+    python_exe = sys.executable.replace("python.exe", "pythonw.exe")
+    if not os.path.exists(python_exe):
+        python_exe = sys.executable
+
+    # 1. Windows Registry HKCU\...\Run
     try:
         import winreg
         key_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
@@ -75,17 +88,35 @@ def set_windows_autostart(enable: bool) -> bool:
             if enable:
                 cmd = get_launch_command()
                 winreg.SetValueEx(key, APP_NAME, 0, winreg.REG_SZ, cmd)
-                print(f"[ConfigManager] Set Windows Auto-Start: {cmd}")
             else:
                 try:
                     winreg.DeleteValue(key, APP_NAME)
-                    print("[ConfigManager] Removed Windows Auto-Start key.")
                 except FileNotFoundError:
-                    pass  # Key didn't exist
-        return True
+                    pass
     except Exception as e:
-        print(f"[ConfigManager] Failed to update Windows registry: {e}")
-        return False
+        print(f"[ConfigManager] Registry update error: {e}")
+        success = False
+
+    # 2. Windows Startup folder VBScript (silent background launcher)
+    vbs_path = get_startup_vbs_path()
+    if vbs_path:
+        try:
+            if enable:
+                vbs_content = (
+                    'Set WshShell = CreateObject("WScript.Shell")\r\n'
+                    f'WshShell.Run """{python_exe}"" ""{run_script}"" --daemon", 0, False\r\n'
+                )
+                with open(vbs_path, "w", encoding="utf-8") as f:
+                    f.write(vbs_content)
+                print(f"[ConfigManager] Created invisible Startup VBS: {vbs_path}")
+            else:
+                if os.path.exists(vbs_path):
+                    os.remove(vbs_path)
+                    print(f"[ConfigManager] Removed Startup VBS: {vbs_path}")
+        except Exception as e:
+            print(f"[ConfigManager] Startup VBS error: {e}")
+
+    return success
 
 def check_windows_autostart_active() -> bool:
     """Checks whether the Windows Startup registry key is present."""

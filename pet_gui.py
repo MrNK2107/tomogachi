@@ -196,9 +196,20 @@ class PetWindow(QWidget):
 
     def trigger_poke_animation(self):
         """Trigger poke reaction."""
+        self.show()
         self.show_custom_bubble("Ouch! Go code! 😾", 100)
         self.move(self.x() + random.choice([-20, 20]), max(0, self.y() - 15))
         self.update()
+
+    def show_pet(self):
+        """Unhides the pet and positions it on screen with greeting bubble."""
+        self.show()
+        self.raise_()
+        self.show_custom_bubble("I'm here! 👋", 120)
+
+    def hide_pet(self):
+        """Hides the pet completely from the desktop view."""
+        self.hide()
 
     def set_mood(self, mood_value: float):
         """Set the pet's mood based on focus history (0=angry, 100=ecstatic)."""
@@ -519,9 +530,19 @@ class ScreenOverlay(QWidget):
         # Vignette effect for Level 3
         self.vignette_alpha = 0.0
         
+        # High-visibility neon perimeter alert strobe
+        self.strobe_remaining_ticks = 0
+        self.strobe_color = QColor("#ff0844")
+        
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.update_overlay)
         self.timer.start(30)  # ~33 FPS
+
+    def trigger_strobe_alert(self, duration_sec: float = 3.0, color: str = "#ff0844"):
+        """Flashes an urgent pulsing neon border & vignette alert across the entire screen."""
+        self.strobe_remaining_ticks = max(self.strobe_remaining_ticks, int(duration_sec * 33))
+        self.strobe_color = QColor(color)
+        self.update()
 
     def set_level(self, level: int):
         if self.level != level:
@@ -550,6 +571,10 @@ class ScreenOverlay(QWidget):
     def update_overlay(self):
         self.anim_tick += 1
         
+        # Decrement strobe alert ticks
+        if self.strobe_remaining_ticks > 0:
+            self.strobe_remaining_ticks -= 1
+        
         if self.level == 3:
             self.flash_alpha += self.flash_dir * 0.008
             if self.flash_alpha >= 0.16:
@@ -570,6 +595,25 @@ class ScreenOverlay(QWidget):
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        
+        # Strobe Alert: High-visibility pulsing perimeter border & corner glow
+        if self.strobe_remaining_ticks > 0:
+            strobe_pulse = (math.sin(self.anim_tick * 0.35) + 1.0) / 2.0  # 0.0 to 1.0
+            alpha = int(140 + 115 * strobe_pulse)
+            
+            # Thick pulsing neon perimeter
+            pen = QPen(QColor(self.strobe_color.red(), self.strobe_color.green(), self.strobe_color.blue(), alpha), 8)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.setPen(pen)
+            painter.drawRect(self.rect().adjusted(4, 4, -4, -4))
+            
+            # Radial red corner vignette flash
+            w, h = self.width(), self.height()
+            vg = QRadialGradient(w / 2, h / 2, max(w, h) * 0.6)
+            vg.setColorAt(0.0, QColor(0, 0, 0, 0))
+            vg.setColorAt(0.65, QColor(0, 0, 0, 0))
+            vg.setColorAt(1.0, QColor(self.strobe_color.red(), self.strobe_color.green(), self.strobe_color.blue(), int(90 * strobe_pulse)))
+            painter.fillRect(self.rect(), QBrush(vg))
         
         # Level 3: Red flash + vignette
         if self.level == 3 and self.flash_alpha > 0.0:
